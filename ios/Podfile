@@ -34,7 +34,6 @@ target 'Runner' do
   pod 'FirebaseCore'
   pod 'FirebaseAuth'
   pod 'FirebaseFirestore'
-  pod 'FirebaseStorage'
   pod 'FirebaseMessaging'
 
   target 'RunnerTests' do

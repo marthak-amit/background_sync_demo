@@ -25,6 +25,8 @@
 		BB0006000000000000000006 /* BackgroundTasks.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0006000000000000000006 /* BackgroundTasks.swift */; };
 		BB0007000000000000000007 /* ChannelBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0007000000000000000007 /* ChannelBridge.swift */; };
 		BB0008000000000000000008 /* Degradation.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0008000000000000000008 /* Degradation.swift */; };
+		BB0009000000000000000009 /* SupabaseConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0009000000000000000009 /* SupabaseConfig.swift */; };
+		BB0010000000000000000010 /* SupabaseUploader.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0010000000000000000010 /* SupabaseUploader.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -78,6 +80,8 @@
 		AA0007000000000000000007 /* ChannelBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChannelBridge.swift; sourceTree = "<group>"; };
 		CC0000000000000000000001 /* Runner.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Runner.entitlements; sourceTree = "<group>"; };
 		AA0008000000000000000008 /* Degradation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Degradation.swift; sourceTree = "<group>"; };
+		AA0009000000000000000009 /* SupabaseConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupabaseConfig.swift; sourceTree = "<group>"; };
+		AA0010000000000000000010 /* SupabaseUploader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupabaseUploader.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -161,6 +165,8 @@
 				AA0006000000000000000006 /* BackgroundTasks.swift */,
 				AA0007000000000000000007 /* ChannelBridge.swift */,
 				AA0008000000000000000008 /* Degradation.swift */,
+				AA0010000000000000000010 /* SupabaseUploader.swift */,
+				AA0009000000000000000009 /* SupabaseConfig.swift */,
 			);
 			path = Sync;
 			sourceTree = "<group>";
@@ -346,6 +352,8 @@
 				BB0006000000000000000006 /* BackgroundTasks.swift in Sources */,
 				BB0007000000000000000007 /* ChannelBridge.swift in Sources */,
 				BB0008000000000000000008 /* Degradation.swift in Sources */,
+				BB0010000000000000000010 /* SupabaseUploader.swift in Sources */,
+				BB0009000000000000000009 /* SupabaseConfig.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

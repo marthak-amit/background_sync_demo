@@ -50,7 +50,7 @@ node tools/analyze_gaps.js export.json --from <startMs> --to <endMs>   # --ontim
 
 For each state (foreground, background, locked, killed) and platform: enable airplane mode, submit 3 posts (2 with images),
 confirm they show as `queued`, then disable airplane mode. Expected: all 3 appear in Firestore `devices/<id>/posts` and the images in
-Storage within ~60 s of the network returning (immediately if the app is in the foreground), with the original `clientTime`, no duplicates.
+Supabase Storage (with the link in the Firestore post) within ~60 s of the network returning (immediately if the app is in the foreground), with the original `clientTime`, no duplicates.
 
 | Platform / state | Posts submitted | Posts synced | Time from network return to last upload | Notes |
 |---|---|---|---|---|

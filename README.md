@@ -12,7 +12,7 @@ would all be rejected in review). Reliability is.
 
 ## Architecture
 
-The app also lets the user **pick an image, type text and submit**; the post (and image, in Cloud Storage) is queued
+The app also lets the user **pick an image, type text and submit**; the post (image in Supabase Storage, image link in Firestore) is queued
 on the device and uploaded as soon as a network exists, in every app state (see *User posts* below). Flutter is UI only. Timers and Firebase writes run in Kotlin / Swift using the native Firebase SDKs, so they
 keep working while the Flutter engine is paused or not running. Flutter talks to native over
 `MethodChannel("sync/control")` (start / stop / status / permissions / fix) and
@@ -72,8 +72,8 @@ UI → **Pick image** (gallery, compressed to ≤1600 px / quality 80) → type 
 2. The post is uploaded by the same machinery as the heartbeat, in the same order of precedence:
    immediately if online; on the next 60 s tick (every wake path, including deduped ones); the moment a network appears
    (Android `NetworkCallback` + WorkManager `CONNECTED` job, iOS `NWPathMonitor`); and on every relaunch.
-3. Upload = image to Storage `devices/{id}/images/{postId}.jpg` (100 s timeout; once uploaded the URL is stored so it is never re-uploaded),
-   then Firestore `devices/{id}/posts/{postId} = {text, imagePath, imageUrl, clientTime, timestamp, deviceId, platform}`. Fixed ids make retries idempotent.
+3. Upload = image to **Supabase Storage** `post-images/devices/{id}/{postId}.jpg` (100 s timeout; once uploaded the public URL is stored locally so it is never re-uploaded),
+   then Firestore `devices/{id}/posts/{postId} = {text, imagePath, imageUrl (Supabase link), clientTime, timestamp, deviceId, platform}`. Fixed ids make retries idempotent.
 4. The "Waiting to upload" list shows queued posts with a `queued` badge; synced posts show a cloud-done icon.
 
 **Background / suspended / killed:** posts ride on the same layers as the heartbeat, so tap **Start sync**. On Android, a queued post is also
@@ -128,15 +128,28 @@ This does not stop the user from powering the phone off, uninstalling (device ow
 Prerequisites: Flutter (stable), Android SDK / JDK 17, Xcode + CocoaPods (iOS), Node 22 + Firebase CLI.
 
 ### 1. Firebase project
-1. Create a project (the demo uses `test-back-sync`) and enable: **Authentication → Anonymous**, **Cloud Firestore** (create the database in production mode; the rules below lock it down) and **Storage**. Storage and Cloud Functions require the **Blaze** plan.
+1. Create a project (the demo uses `test-back-sync`) and enable: **Authentication → Anonymous**, **Cloud Firestore** (create the database in production mode; the rules below lock it down) (Firebase **Storage is not used**; images go to Supabase). Cloud Functions require the **Blaze** plan.
 2. Add an Android app `com.demo.background_sync_demo` and an iOS app `com.demo.backgroundSyncDemo`.
 3. Put the files in place (git-ignored; download them from the Firebase console for project `test-back-sync`):
    - `android/app/google-services.json`
    - `ios/Runner/GoogleService-Info.plist` (a build phase copies it into the app bundle; nothing to drag in Xcode)
-4. Deploy the rules: `firebase deploy --only firestore,storage`
-   (`firestore.rules` / `storage.rules`: a device can read/write only `devices/{its own uid}` and `devices/{its own uid}/images/*`). `.firebaserc` already points at `test-back-sync`.
+4. Deploy the rules: `firebase deploy --only firestore`
+   (`firestore.rules`: a device can read/write only `devices/{its own uid}` and its subcollections). `.firebaserc` already points at `test-back-sync`.
 5. If you use different bundle / package ids, change them in the Android `applicationId`, the Xcode bundle id,
    and `BGTaskSchedulerPermittedIdentifiers` / `Config.swift` / `APNS_BUNDLE_ID` (they must all agree).
+
+### 1b. Supabase (image storage)
+Images are stored in **Supabase Storage**; only the resulting public link is saved in the Firestore post document.
+1. Create a Supabase project. In **SQL Editor** run [`docs/supabase_setup.sql`](docs/supabase_setup.sql) (creates the public bucket `post-images`, JPEG only, 10 MB max, and the upload policies).
+2. Project settings → API: copy the **Project URL** and the **anon public** key.
+3. Put them in **both** `android/app/src/main/kotlin/com/demo/background_sync_demo/SupabaseConfig.kt` and `ios/Runner/Sync/SupabaseConfig.swift`
+   (replace `YOUR_SUPABASE_URL` / `YOUR_SUPABASE_ANON_KEY`). Until you do, posts with images stay queued on the device and text-only posts still sync.
+4. The app uploads over the Storage REST API (`POST /storage/v1/object/post-images/devices/{deviceId}/{postId}.jpg`, `x-upsert: true`) and
+   stores `https://<project>.supabase.co/storage/v1/object/public/post-images/...` in `devices/{id}/posts/{postId}.imageUrl`.
+
+Security note: the anon key ships inside the app, and the bucket is public-read with anon insert/update, so anyone who extracts the key could upload JPEGs to that
+bucket (size and type are capped; deletes are impossible). That is acceptable for an internal demo. To harden it later, put the upload behind a Supabase Edge Function
+that verifies the Firebase ID token and returns a signed upload URL.
 
 ### 2. APNs key and VoIP (iOS only)
 A single **APNs Auth Key (.p8)** covers regular, silent and VoIP pushes, so no separate VoIP certificate is needed.
@@ -155,7 +168,7 @@ Scheduled functions (Cloud Scheduler), Secret Manager and outbound calls to APNs
 At 1 invocation/minute for a few devices the cost is normally cents per month, but it is not free-tier.
 ```bash
 cd functions && npm install && cd ..
-firebase deploy --only functions,firestore,storage
+firebase deploy --only functions,firestore
 # at deploy time you are asked for: APNS_KEY_ID, APNS_TEAM_ID, APNS_BUNDLE_ID, APNS_SANDBOX
 ```
 Use `APNS_SANDBOX=true` for builds run from Xcode (development provisioning), `false` for TestFlight / ad-hoc / production.
@@ -218,6 +231,6 @@ android/app/src/main/kotlin/...    SyncManager, SyncService, Scheduler, Receiver
 ios/Runner/Sync/*.swift            SyncManager, LocationKeepAlive, SilentAudio, VoipPushHandler, BackgroundTasks, ChannelBridge
 ios/Runner/AppDelegate.swift       launch detection, BG task / PushKit registration, silent push
 functions/src/index.ts             syncTick (FCM + APNs VoIP)
-firestore.rules  storage.rules  firebase.json
+firestore.rules  firebase.json  docs/supabase_setup.sql
 tools/export_logs.js, analyze_gaps.js   export Firestore logs + gap statistics for RELIABILITY.md
 ```

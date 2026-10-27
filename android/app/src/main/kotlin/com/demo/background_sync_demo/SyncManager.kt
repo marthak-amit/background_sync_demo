@@ -3,7 +3,6 @@ package com.demo.background_sync_demo
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
-import android.net.Uri
 import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
@@ -16,8 +15,6 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreSettings
 import com.google.firebase.firestore.PersistentCacheSettings
 import com.google.firebase.firestore.SetOptions
-import com.google.firebase.storage.FirebaseStorage
-import com.google.firebase.storage.StorageMetadata
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.Executors
@@ -32,8 +29,8 @@ import java.util.concurrent.locks.ReentrantLock
  *
  * Firestore layout:  devices/{deviceId}              meta fields (lastN, lastWriteAt, platform, fcmToken, ...)
  *                    devices/{deviceId}/logs/{id}    heartbeat "Test_n" records
- *                    devices/{deviceId}/posts/{id}   user posts (text + optional Storage image)
- * Storage:           devices/{deviceId}/images/{postId}.jpg
+ *                    devices/{deviceId}/posts/{id}   user posts (text + optional Supabase image link)
+ * Images:            Supabase Storage bucket, object devices/{deviceId}/{postId}.jpg; the public URL is stored in the post doc
  */
 object SyncManager {
     private const val TAG = "SyncManager"
@@ -248,20 +245,19 @@ object SyncManager {
         }
     }
 
-    /** Posts: upload the image to Storage, then write the Firestore document that references it. */
+    /** Posts: upload the image to Supabase Storage, then write the Firestore document holding the image link. */
     private fun flushPosts(store: SyncStore, uid: String): Boolean {
         for (p in store.pendingPosts()) {
             var url = p.uploadedUrl
-            val path = "devices/$uid/images/${p.id}.jpg"
+            val path = "devices/$uid/${p.id}.jpg"
             if (p.imagePath != null && url == null) {
                 val f = File(p.imagePath)
                 if (f.exists()) {
-                    val ref = FirebaseStorage.getInstance().reference.child(path)
-                    val up = ref.putFile(Uri.fromFile(f), StorageMetadata.Builder().setContentType("image/jpeg").build())
-                    if (!ok(up, Config.UPLOAD_TIMEOUT_S)) { up.cancel(); return false }
-                    url = try {
-                        Tasks.await(ref.downloadUrl, Config.WRITE_TIMEOUT_S, TimeUnit.SECONDS).toString()
-                    } catch (e: Exception) { return false }
+                    if (!SupabaseUploader.isConfigured) {
+                        Log.w(TAG, "Supabase not configured (SupabaseConfig.kt): post ${p.id} stays queued")
+                        continue
+                    }
+                    url = SupabaseUploader.upload(f, path) ?: return false
                     store.setPostUrl(p.id, url) // never re-upload once the object exists
                 } else {
                     url = "" // source file vanished: sync the text on its own
@@ -269,7 +265,7 @@ object SyncManager {
             }
             val doc = hashMapOf<String, Any?>(
                 "text" to p.text,
-                "imagePath" to if (url.isNullOrEmpty()) null else path,
+                "imagePath" to if (url.isNullOrEmpty()) null else "${SupabaseConfig.BUCKET}/$path",
                 "imageUrl" to if (url.isNullOrEmpty()) null else url,
                 "clientTime" to p.clientTime,
                 "timestamp" to FieldValue.serverTimestamp(),

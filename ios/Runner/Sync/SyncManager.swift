@@ -3,7 +3,6 @@ import Network
 import FirebaseCore
 import FirebaseAuth
 import FirebaseFirestore
-import FirebaseStorage
 import FirebaseMessaging
 
 /// The single write path. Every layer (timer, location, audio, PushKit, silent FCM, BGTask, relaunch)
@@ -11,7 +10,7 @@ import FirebaseMessaging
 /// depends on the network. Flutter never touches this.
 ///
 /// Firestore: devices/{deviceId} (meta fields), devices/{deviceId}/logs/{id}, devices/{deviceId}/posts/{id}
-/// Storage:   devices/{deviceId}/images/{postId}.jpg
+/// Images:    Supabase Storage bucket, object devices/{deviceId}/{postId}.jpg; the public URL is stored in the post doc
 final class SyncManager {
     static let shared = SyncManager()
 
@@ -223,26 +222,18 @@ final class SyncManager {
         return true
     }
 
-    /// Posts: upload the image to Storage, then write the Firestore document that references it.
+    /// Posts: upload the image to Supabase Storage, then write the Firestore document holding the image link.
     private func flushPosts(_ uid: String) -> Bool {
         for p in store.pendingPosts() {
             var url = p.uploadedUrl
-            let path = "devices/\(uid)/images/\(p.id).jpg"
+            let path = "devices/\(uid)/\(p.id).jpg"
             if let ip = p.imagePath, url == nil {
                 if FileManager.default.fileExists(atPath: ip) {
-                    let ref = Storage.storage().reference(withPath: path)
-                    let md = StorageMetadata()
-                    md.contentType = "image/jpeg"
-                    var task: StorageUploadTask?
-                    let uploaded = waitFor(Config.uploadTimeout, { done in
-                        task = ref.putFile(from: URL(fileURLWithPath: ip), metadata: md) { _, err in done(err == nil) }
-                    })
-                    if !uploaded { task?.cancel(); return false }
-                    var link: String?
-                    let gotUrl = waitFor(Config.writeTimeout, { done in
-                        ref.downloadURL { u, err in link = u?.absoluteString; done(err == nil && u != nil) }
-                    })
-                    guard gotUrl, let l = link else { return false }
+                    guard SupabaseUploader.isConfigured else {
+                        NSLog("[Sync] Supabase not configured (SupabaseConfig.swift): post %@ stays queued", p.id)
+                        continue
+                    }
+                    guard let l = SupabaseUploader.upload(fileURL: URL(fileURLWithPath: ip), objectPath: path) else { return false }
                     url = l
                     store.setPostUrl(p.id, l) // never re-upload once the object exists
                 } else {
@@ -254,7 +245,7 @@ final class SyncManager {
                 "text": p.text, "clientTime": p.clientTime, "timestamp": FieldValue.serverTimestamp(),
                 "deviceId": uid, "platform": "ios",
             ]
-            if hasImage { doc["imagePath"] = path; doc["imageUrl"] = url! }
+            if hasImage { doc["imagePath"] = "\(SupabaseConfig.bucket)/\(path)"; doc["imageUrl"] = url! }
             let ref = db().document("devices/\(uid)/posts/\(p.id)")
             guard waitFor(Config.writeTimeout, { done in ref.setData(doc) { done($0 == nil) } }) else { return false }
             if let ip = p.imagePath { try? FileManager.default.removeItem(atPath: ip) }
