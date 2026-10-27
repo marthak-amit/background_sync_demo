@@ -47,6 +47,28 @@
 			</array>
 		</dict>
 	</dict>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>location</string>
+		<string>audio</string>
+		<string>fetch</string>
+		<string>processing</string>
+		<string>remote-notification</string>
+		<string>voip</string>
+	</array>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.demo.backgroundSyncDemo.refresh</string>
+		<string>com.demo.backgroundSyncDemo.processing</string>
+	</array>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Always-on location keeps the sync running while the app is in the background or has been closed.</string>
+	<key>NSLocationAlwaysUsageDescription</key>
+	<string>Always-on location keeps the sync running while the app is in the background or has been closed.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Location keeps the sync running while the app is open.</string>
+	<key>FirebaseAppDelegateProxyEnabled</key>
+	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>

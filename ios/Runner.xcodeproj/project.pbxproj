@@ -16,6 +16,14 @@
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
+		BB0000000000000000000000 /* Config.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000000 /* Config.swift */; };
+		BB0001000000000000000001 /* SyncStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0001000000000000000001 /* SyncStore.swift */; };
+		BB0002000000000000000002 /* SyncManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0002000000000000000002 /* SyncManager.swift */; };
+		BB0003000000000000000003 /* LocationKeepAlive.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0003000000000000000003 /* LocationKeepAlive.swift */; };
+		BB0004000000000000000004 /* SilentAudio.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0004000000000000000004 /* SilentAudio.swift */; };
+		BB0005000000000000000005 /* VoipPushHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0005000000000000000005 /* VoipPushHandler.swift */; };
+		BB0006000000000000000006 /* BackgroundTasks.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0006000000000000000006 /* BackgroundTasks.swift */; };
+		BB0007000000000000000007 /* ChannelBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0007000000000000000007 /* ChannelBridge.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -59,6 +67,15 @@
 		97C146FD1CF9000F007C117D /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		97C147001CF9000F007C117D /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		97C147021CF9000F007C117D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		AA0000000000000000000000 /* Config.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Config.swift; sourceTree = "<group>"; };
+		AA0001000000000000000001 /* SyncStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncStore.swift; sourceTree = "<group>"; };
+		AA0002000000000000000002 /* SyncManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncManager.swift; sourceTree = "<group>"; };
+		AA0003000000000000000003 /* LocationKeepAlive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationKeepAlive.swift; sourceTree = "<group>"; };
+		AA0004000000000000000004 /* SilentAudio.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SilentAudio.swift; sourceTree = "<group>"; };
+		AA0005000000000000000005 /* VoipPushHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoipPushHandler.swift; sourceTree = "<group>"; };
+		AA0006000000000000000006 /* BackgroundTasks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundTasks.swift; sourceTree = "<group>"; };
+		AA0007000000000000000007 /* ChannelBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChannelBridge.swift; sourceTree = "<group>"; };
+		CC0000000000000000000001 /* Runner.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Runner.entitlements; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -124,8 +141,25 @@
 				74858FAE1ED2DC5600515810 /* AppDelegate.swift */,
 				7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
+				DD0000000000000000000001 /* Sync */,
+				CC0000000000000000000001 /* Runner.entitlements */,
 			);
 			path = Runner;
+			sourceTree = "<group>";
+		};
+		DD0000000000000000000001 /* Sync */ = {
+			isa = PBXGroup;
+			children = (
+				AA0000000000000000000000 /* Config.swift */,
+				AA0001000000000000000001 /* SyncStore.swift */,
+				AA0002000000000000000002 /* SyncManager.swift */,
+				AA0003000000000000000003 /* LocationKeepAlive.swift */,
+				AA0004000000000000000004 /* SilentAudio.swift */,
+				AA0005000000000000000005 /* VoipPushHandler.swift */,
+				AA0006000000000000000006 /* BackgroundTasks.swift */,
+				AA0007000000000000000007 /* ChannelBridge.swift */,
+			);
+			path = Sync;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -156,6 +190,7 @@
 				97C146EA1CF9000F007C117D /* Sources */,
 				97C146EB1CF9000F007C117D /* Frameworks */,
 				97C146EC1CF9000F007C117D /* Resources */,
+				EE0000000000000000000001 /* Copy GoogleService-Info.plist */,
 				9705A1C41CF9048500538489 /* Embed Frameworks */,
 				3B06AD1E1E4923F5004D2608 /* Thin Binary */,
 			);
@@ -266,6 +301,21 @@
 			shellPath = /bin/sh;
 			shellScript = "/bin/sh \"$FLUTTER_ROOT/packages/flutter_tools/bin/xcode_backend.sh\" build";
 		};
+		EE0000000000000000000001 /* Copy GoogleService-Info.plist */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Copy GoogleService-Info.plist";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "if [ -f \"${SRCROOT}/Runner/GoogleService-Info.plist\" ]; then cp \"${SRCROOT}/Runner/GoogleService-Info.plist\" \"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/GoogleService-Info.plist\"; else echo \"warning: ios/Runner/GoogleService-Info.plist not found - Firebase disabled\"; fi";
+		};
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -284,6 +334,14 @@
 				74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */,
+				BB0000000000000000000000 /* Config.swift in Sources */,
+				BB0001000000000000000001 /* SyncStore.swift in Sources */,
+				BB0002000000000000000002 /* SyncManager.swift in Sources */,
+				BB0003000000000000000003 /* LocationKeepAlive.swift in Sources */,
+				BB0004000000000000000004 /* SilentAudio.swift in Sources */,
+				BB0005000000000000000005 /* VoipPushHandler.swift in Sources */,
+				BB0006000000000000000006 /* BackgroundTasks.swift in Sources */,
+				BB0007000000000000000007 /* ChannelBridge.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -383,6 +441,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				CODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements;
 				PRODUCT_BUNDLE_IDENTIFIER = com.demo.backgroundSyncDemo;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
@@ -564,6 +623,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				CODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements;
 				PRODUCT_BUNDLE_IDENTIFIER = com.demo.backgroundSyncDemo;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
@@ -586,6 +646,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				CODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements;
 				PRODUCT_BUNDLE_IDENTIFIER = com.demo.backgroundSyncDemo;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
