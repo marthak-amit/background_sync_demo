@@ -1,6 +1,6 @@
 # Background Sync Demo (Flutter, Android + iOS)
 
-Demo build that tries to write `Test_{n}` to Firebase Realtime Database **every 60 s in every app state**
+Demo build that tries to write `Test_{n}` to Cloud Firestore **every 60 s in every app state**
 (foreground, background, screen locked, killed), by stacking every wake mechanism the two OSes offer.
 **Store-policy compliance is not a goal** (continuous location, silent audio, and VoIP/CallKit as a wake trick
 would all be rejected in review). Reliability is.
@@ -12,7 +12,8 @@ would all be rejected in review). Reliability is.
 
 ## Architecture
 
-Flutter is UI only. Timers and Firebase writes run in Kotlin / Swift using the native Firebase SDKs, so they
+The app also lets the user **pick an image, type text and submit**; the post (and image, in Cloud Storage) is queued
+on the device and uploaded as soon as a network exists, in every app state (see *User posts* below). Flutter is UI only. Timers and Firebase writes run in Kotlin / Swift using the native Firebase SDKs, so they
 keep working while the Flutter engine is paused or not running. Flutter talks to native over
 `MethodChannel("sync/control")` (start / stop / status / permissions / fix) and
 `EventChannel("sync/logs")` (live last-30 records). Flutter needs no Firebase plugin and no
@@ -23,11 +24,13 @@ Every layer calls one function, `SyncManager.writeTick(appState)` (`SyncManager.
 1. Skip if the last write was < 55 s ago (`Config.DEDUPE_MS`), the same check for every wake path.
 2. `n = lastN + 1`, persisted locally (`SharedPreferences` / `UserDefaults`) **before** anything is sent.
 3. Insert into a local **SQLite queue** with a pre-generated push key (retries are idempotent).
-4. Flush the queue in order; one multi-path update writes `logs/{autoId}` + `meta/{lastN,lastWriteAt,platform,fcmToken[,voipToken]}`.
-   Offline: the row stays queued and is flushed on the next tick. RTDB offline persistence is also enabled.
-5. On every start `reconcile()` runs a transaction on `meta/lastN` setting it to `max(remote, local)`.
+4. Flush the queue in order; one Firestore batch writes `devices/{id}/logs/{id}` + merges `lastN, lastWriteAt, platform, fcmToken[, voipToken]`
+   into the device document `devices/{id}`. Offline: the row stays queued and is flushed when a network returns. Firestore's persistent cache is also enabled.
+5. On every start `reconcile()` runs a transaction on `devices/{id}.lastN` setting it to `max(remote, local)`.
 
 Record: `{value, n, platform, appState, deviceId, clientTime, timestamp (server), gapSeconds}`.
+Firestore has no `meta` sibling of a document, so the per-device meta fields live on the device document itself
+(`devices/{id}`), with `logs` and `posts` as its subcollections.
 `deviceId` is the anonymous-auth uid, which is what the security rules key on.
 `appState` is one of `foreground | background | killed_relaunch | push_wake | bg_task`.
 
@@ -61,6 +64,23 @@ background, the alarm / WorkManager / FCM layers still call `writeTick` directly
 | 8 | Info.plist: `UIBackgroundModes` = location, audio, fetch, processing, remote-notification, voip; location usage strings; `BGTaskSchedulerPermittedIdentifiers` | `Info.plist` |
 | 9 | Entitlement `aps-environment`; Background Modes are the plist keys above | `Runner.entitlements` |
 
+## User posts (image + text, offline-first)
+
+UI → **Pick image** (gallery, compressed to ≤1600 px / quality 80) → type text → **Submit**. Image is optional.
+
+1. `submitPost` copies the image into an app-private outbox and inserts a row in the same SQLite database as the heartbeat queue. Nothing is sent yet, so it works with no connectivity.
+2. The post is uploaded by the same machinery as the heartbeat, in the same order of precedence:
+   immediately if online; on the next 60 s tick (every wake path, including deduped ones); the moment a network appears
+   (Android `NetworkCallback` + WorkManager `CONNECTED` job, iOS `NWPathMonitor`); and on every relaunch.
+3. Upload = image to Storage `devices/{id}/images/{postId}.jpg` (100 s timeout; once uploaded the URL is stored so it is never re-uploaded),
+   then Firestore `devices/{id}/posts/{postId} = {text, imagePath, imageUrl, clientTime, timestamp, deviceId, platform}`. Fixed ids make retries idempotent.
+4. The "Waiting to upload" list shows queued posts with a `queued` badge; synced posts show a cloud-done icon.
+
+**Background / suspended / killed:** posts ride on the same layers as the heartbeat, so tap **Start sync**. On Android, a queued post is also
+guaranteed an upload by a persistent WorkManager job even if sync is stopped (not after Force Stop; see managed devices). On iOS, uploads happen while the
+keep-alive layers run or after one of the relaunch paths wakes the app (location, VoIP, silent push, BGTask), and iOS gives a woken app limited time,
+so very large images on a poor link may need a later wake: images are compressed to keep uploads short.
+
 ## Offline and "must not lose data" behaviour
 
 Remote units will often have no connectivity. Writes are therefore **never dependent on the network**:
@@ -78,9 +98,9 @@ every tick is persisted (counter + SQLite row) before any network call, so nothi
 
 | Blocker | Can an app defeat it? | What this repo does |
 |---|---|---|
-| Android **Force Stop** / Clear data | **Only on a managed device.** Stopped packages receive no alarms, jobs, services, broadcasts or FCM, so no app code can survive it. | **Device-owner mode** (below) greys out Force Stop and Clear data for the app. Elsewhere: `ExitReasons` writes `meta/lastExit = USER_REQUESTED_FORCE_STOP@…` on the next start, the checklist shows a red row, and `staleDeviceAlert` notifies the user. |
-| iOS **Low Power Mode** | No. Only the user can change it. | Layers that LPM leaves running (location, audio, VoIP, timer) stay on; `Degradation.swift` posts a local notification the moment it turns on, shows a red checklist row, and reports `meta/lowPowerMode`. |
-| iOS **Background App Refresh off** | No. | It only disables the BGTask and silent-push layers; location, audio and VoIP do not use it. Same alert + `meta/bgRefresh`. |
+| Android **Force Stop** / Clear data | **Only on a managed device.** Stopped packages receive no alarms, jobs, services, broadcasts or FCM, so no app code can survive it. | **Device-owner mode** (below) greys out Force Stop and Clear data for the app. Elsewhere: `ExitReasons` writes `lastExit = USER_REQUESTED_FORCE_STOP@…` on the device document on the next start, the checklist shows a red row, and `staleDeviceAlert` notifies the user. |
+| iOS **Low Power Mode** | No. Only the user can change it. | Layers that LPM leaves running (location, audio, VoIP, timer) stay on; `Degradation.swift` posts a local notification the moment it turns on, shows a red checklist row, and reports `lowPowerMode`. |
+| iOS **Background App Refresh off** | No. | It only disables the BGTask and silent-push layers; location, audio and VoIP do not use it. Same alert + `bgRefresh`. |
 | iOS user force-quits | Partly | VoIP push + location relaunch still wake the app. |
 
 `staleDeviceAlert` (Cloud Function, every 5 min) sends a visible notification to any device that has not written
@@ -108,13 +128,13 @@ This does not stop the user from powering the phone off, uninstalling (device ow
 Prerequisites: Flutter (stable), Android SDK / JDK 17, Xcode + CocoaPods (iOS), Node 22 + Firebase CLI.
 
 ### 1. Firebase project
-1. Create a project, enable **Authentication → Anonymous**, and create a **Realtime Database**.
+1. Create a project (the demo uses `test-back-sync`) and enable: **Authentication → Anonymous**, **Cloud Firestore** (create the database in production mode; the rules below lock it down) and **Storage**. Storage and Cloud Functions require the **Blaze** plan.
 2. Add an Android app `com.demo.background_sync_demo` and an iOS app `com.demo.backgroundSyncDemo`.
-3. Put the files in place (both are git-ignored):
+3. Put the files in place (git-ignored; download them from the Firebase console for project `test-back-sync`):
    - `android/app/google-services.json`
    - `ios/Runner/GoogleService-Info.plist` (a build phase copies it into the app bundle; nothing to drag in Xcode)
-4. Set the project id in `.firebaserc`, then deploy the rules: `firebase deploy --only database`
-   (`database.rules.json`: a device can read/write only `devices/{its own uid}`).
+4. Deploy the rules: `firebase deploy --only firestore,storage`
+   (`firestore.rules` / `storage.rules`: a device can read/write only `devices/{its own uid}` and `devices/{its own uid}/images/*`). `.firebaserc` already points at `test-back-sync`.
 5. If you use different bundle / package ids, change them in the Android `applicationId`, the Xcode bundle id,
    and `BGTaskSchedulerPermittedIdentifiers` / `Config.swift` / `APNS_BUNDLE_ID` (they must all agree).
 
@@ -135,7 +155,7 @@ Scheduled functions (Cloud Scheduler), Secret Manager and outbound calls to APNs
 At 1 invocation/minute for a few devices the cost is normally cents per month, but it is not free-tier.
 ```bash
 cd functions && npm install && cd ..
-firebase deploy --only functions,database
+firebase deploy --only functions,firestore,storage
 # at deploy time you are asked for: APNS_KEY_ID, APNS_TEAM_ID, APNS_BUNDLE_ID, APNS_SANDBOX
 ```
 Use `APNS_SANDBOX=true` for builds run from Xcode (development provisioning), `false` for TestFlight / ad-hoc / production.
@@ -184,8 +204,12 @@ Expect `killed_relaunch` as the first tag after a restart, `bg_task` from alarm/
 - Force BG tasks from the debugger: `e -l objc -- (void)[[BGTaskScheduler sharedScheduler] _simulateLaunchForTaskWithIdentifier:@"com.demo.backgroundSyncDemo.refresh"]`
 - VoIP and silent FCM need a **real device** (the simulator has no APNs tokens).
 
-**Measure**: export `devices/<id>` from the Realtime Database console and run
-`node tools/analyze_gaps.js export.json --from <startMs> --to <endMs>` for per-state max gap and % on time.
+**Measure**: export the logs and analyse them (needs a service-account key; see the header of the script):
+```bash
+node tools/export_logs.js                       # list device ids
+node tools/export_logs.js <deviceId> export.json
+node tools/analyze_gaps.js export.json --from <startMs> --to <endMs>   # per-state max gap and % on time
+```
 
 ## Layout
 ```
@@ -194,6 +218,6 @@ android/app/src/main/kotlin/...    SyncManager, SyncService, Scheduler, Receiver
 ios/Runner/Sync/*.swift            SyncManager, LocationKeepAlive, SilentAudio, VoipPushHandler, BackgroundTasks, ChannelBridge
 ios/Runner/AppDelegate.swift       launch detection, BG task / PushKit registration, silent push
 functions/src/index.ts             syncTick (FCM + APNs VoIP)
-database.rules.json  firebase.json
-tools/analyze_gaps.js              gap statistics for RELIABILITY.md
+firestore.rules  storage.rules  firebase.json
+tools/export_logs.js, analyze_gaps.js   export Firestore logs + gap statistics for RELIABILITY.md
 ```

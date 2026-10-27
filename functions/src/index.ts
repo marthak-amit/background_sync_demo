@@ -39,18 +39,22 @@ async function pool<T>(items: T[], fn: (item: T) => Promise<void>): Promise<void
   await Promise.all(workers);
 }
 
-/** Lists devices/* keys without downloading their (large) logs subtrees, via the RTDB REST `shallow` query. */
-async function deviceIds(): Promise<string[]> {
-  const cred = admin.app().options.credential ?? admin.credential.applicationDefault();
-  const { access_token } = await cred.getAccessToken();
-  const base = admin.database().ref().toString().replace(/\/$/, "");
-  const res = await fetch(`${base}/devices.json?shallow=true`, {
-    headers: { Authorization: `Bearer ${access_token}` },
-  });
-  if (!res.ok) throw new Error(`shallow list failed: ${res.status} ${await res.text()}`);
-  const body = (await res.json()) as Record<string, boolean> | null;
-  return body ? Object.keys(body) : [];
+/** All device docs (meta fields live on devices/{id}; logs/posts are subcollections and are NOT loaded). */
+async function loadDevices(): Promise<Map<string, Meta>> {
+  const snap = await admin.firestore().collection("devices").get();
+  const out = new Map<string, Meta>();
+  for (const d of snap.docs) {
+    const raw = d.data();
+    out.set(d.id, {
+      ...raw,
+      lastWriteAt: raw.lastWriteAt?.toMillis?.(),
+      lastAlertAt: typeof raw.lastAlertAt === "number" ? raw.lastAlertAt : raw.lastAlertAt?.toMillis?.(),
+    } as Meta);
+  }
+  return out;
 }
+
+const deviceDoc = (id: string) => admin.firestore().doc(`devices/${id}`);
 
 // ---------------------------------------------------------------- FCM (Android high priority + iOS silent)
 
@@ -77,7 +81,7 @@ async function sendFcm(id: string, meta: Meta): Promise<void> {
   } catch (e) {
     const code = (e as { code?: string }).code ?? "";
     if (code === "messaging/registration-token-not-registered" || code === "messaging/invalid-registration-token") {
-      await admin.database().ref(`devices/${id}/meta/fcmToken`).remove();
+      await deviceDoc(id).update({ fcmToken: admin.firestore.FieldValue.delete() });
       logger.warn("removed stale fcmToken", { id });
     } else {
       logger.error("fcm send failed", { id, code });
@@ -141,12 +145,7 @@ export const syncTick = onSchedule(
     secrets: [APNS_KEY_P8],
   },
   async () => {
-    const ids = await deviceIds();
-    const metas = new Map<string, Meta>();
-    await pool(ids, async (id) => {
-      const snap = await admin.database().ref(`devices/${id}/meta`).get();
-      if (snap.exists()) metas.set(id, snap.val() as Meta);
-    });
+    const metas = await loadDevices();
 
     // 1) FCM: Android high-priority data + iOS silent background push.
     await pool([...metas.entries()], ([id, m]) => sendFcm(id, m));
@@ -169,7 +168,7 @@ export const syncTick = onSchedule(
             const r = await sendVoip(session, m.voipToken!, jwt, APNS_BUNDLE_ID.value());
             if (r.status === 200) return;
             if (r.status === 410 || r.reason === "BadDeviceToken" || r.reason === "Unregistered") {
-              await admin.database().ref(`devices/${id}/meta/voipToken`).remove();
+              await deviceDoc(id).update({ voipToken: admin.firestore.FieldValue.delete() });
               logger.warn("removed stale voipToken", { id, reason: r.reason });
             } else {
               logger.error("voip push failed", { id, status: r.status, reason: r.reason });
@@ -209,13 +208,10 @@ function staleMessage(m: Meta): string {
 export const staleDeviceAlert = onSchedule(
   { schedule: "every 5 minutes", timeoutSeconds: 120, memory: "256MiB" },
   async () => {
-    const ids = await deviceIds();
+    const metas = await loadDevices();
     const now = Date.now();
     let alerted = 0;
-    await pool(ids, async (id) => {
-      const snap = await admin.database().ref(`devices/${id}/meta`).get();
-      if (!snap.exists()) return;
-      const m = snap.val() as Meta;
+    await pool([...metas.entries()], async ([id, m]) => {
       if (!m.fcmToken || !m.lastWriteAt || now - m.lastWriteAt < STALE_MS) return;
       if (m.lastAlertAt && now - m.lastAlertAt < ALERT_COOLDOWN_MS) return;
       const body = staleMessage(m);
@@ -226,12 +222,12 @@ export const staleDeviceAlert = onSchedule(
           android: { priority: "high", ttl: 3_600_000, notification: { channelId: "bgsync" } },
           apns: { headers: { "apns-priority": "10", "apns-push-type": "alert" }, payload: { aps: { sound: "default" } } },
         });
-        await admin.database().ref(`devices/${id}/meta/lastAlertAt`).set(now);
+        await deviceDoc(id).update({ lastAlertAt: now });
         alerted++;
       } catch (e) {
         logger.warn("stale alert failed", { id, code: (e as { code?: string }).code });
       }
     });
-    logger.info("staleDeviceAlert done", { devices: ids.length, alerted });
+    logger.info("staleDeviceAlert done", { devices: metas.size, alerted });
   },
 );

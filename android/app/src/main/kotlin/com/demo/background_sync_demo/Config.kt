@@ -7,6 +7,9 @@ object Config {
     const val WAKELOCK_MS = 30_000L
     const val WRITE_TIMEOUT_S = 20L
     const val AUTH_TIMEOUT_S = 15L
+    const val UPLOAD_TIMEOUT_S = 100L
+    /** Flush wake lock: long enough for a compressed image upload, always released in finally. */
+    const val FLUSH_WAKELOCK_MS = 150_000L
     const val FLUSH_BATCH = 50
 
     /** Extra layer: keep the CPU awake between ticks (self-expiring, renewed every tick). */

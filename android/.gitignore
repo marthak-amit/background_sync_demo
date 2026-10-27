@@ -13,5 +13,6 @@ key.properties
 **/*.keystore
 **/*.jks
 
-# user-provided Firebase config (never commit real keys)
+
+# user-provided Firebase config (not committed)
 app/google-services.json

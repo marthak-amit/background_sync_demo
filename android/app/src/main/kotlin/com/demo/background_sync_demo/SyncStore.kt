@@ -6,6 +6,15 @@ import android.content.SharedPreferences
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 
+/** A user post (text + optional image) waiting to be uploaded. */
+data class PostRow(
+    val id: String,
+    val text: String,
+    val imagePath: String?,
+    val clientTime: Long,
+    val uploadedUrl: String?,
+)
+
 data class QueuedRecord(
     val seq: Long,
     val key: String,
@@ -17,19 +26,25 @@ data class QueuedRecord(
 
 /** Local persistence: counter / timestamps in SharedPreferences, offline write queue in SQLite. */
 class SyncStore private constructor(ctx: Context) :
-    SQLiteOpenHelper(ctx, "sync_queue.db", null, 1) {
+    SQLiteOpenHelper(ctx, "sync_queue.db", null, 2) {
 
     private val prefs: SharedPreferences =
         ctx.getSharedPreferences("sync_prefs", Context.MODE_PRIVATE)
 
+    private fun createPosts(db: SQLiteDatabase) = db.execSQL(
+        "CREATE TABLE IF NOT EXISTS posts(seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, " +
+            "text TEXT NOT NULL, image_path TEXT, client_time INTEGER NOT NULL, uploaded_url TEXT)"
+    )
+
     override fun onCreate(db: SQLiteDatabase) {
+        createPosts(db)
         db.execSQL(
             "CREATE TABLE queue(seq INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL, " +
                 "n INTEGER NOT NULL, app_state TEXT NOT NULL, client_time INTEGER NOT NULL, gap INTEGER NOT NULL)"
         )
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) { createPosts(db) }
 
     // commit() (not apply()) on purpose: the counter must hit disk before we write remotely.
     var lastN: Long
@@ -105,8 +120,38 @@ class SyncStore private constructor(ctx: Context) :
         writableDatabase.delete("queue", "seq=?", arrayOf(seq.toString()))
     }
 
-    fun pending(): Long =
-        readableDatabase.rawQuery("SELECT COUNT(*) FROM queue", null).use { if (it.moveToFirst()) it.getLong(0) else 0L }
+    /** Heartbeat rows + posts still waiting to reach Firebase. */
+    fun pending(): Long = count("queue") + count("posts")
+
+    private fun count(table: String): Long =
+        readableDatabase.rawQuery("SELECT COUNT(*) FROM $table", null).use { if (it.moveToFirst()) it.getLong(0) else 0L }
+
+    fun addPost(id: String, text: String, imagePath: String?, clientTime: Long) {
+        val cv = ContentValues().apply {
+            put("id", id); put("text", text); put("image_path", imagePath); put("client_time", clientTime)
+        }
+        writableDatabase.insertOrThrow("posts", null, cv)
+    }
+
+    fun pendingPosts(): List<PostRow> {
+        val out = ArrayList<PostRow>()
+        readableDatabase.rawQuery(
+            "SELECT id,text,image_path,client_time,uploaded_url FROM posts ORDER BY seq ASC", null
+        ).use { c ->
+            while (c.moveToNext()) {
+                out += PostRow(c.getString(0), c.getString(1), c.getString(2), c.getLong(3), c.getString(4))
+            }
+        }
+        return out
+    }
+
+    fun setPostUrl(id: String, url: String) {
+        writableDatabase.execSQL("UPDATE posts SET uploaded_url=? WHERE id=?", arrayOf(url, id))
+    }
+
+    fun deletePost(id: String) {
+        writableDatabase.delete("posts", "id=?", arrayOf(id))
+    }
 
     companion object {
         @Volatile private var inst: SyncStore? = null

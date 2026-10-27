@@ -60,8 +60,10 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params) {
 class FlushWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params) {
     override fun doWork(): Result {
         val app = applicationContext
-        if (!SyncStore.get(app).running) return Result.success()
-        if (!SyncService.isRunning) Scheduler.startService(app, restart = true)
+        val store = SyncStore.get(app)
+        // Posts must upload even if the user has not started the 60 s sync.
+        if (!store.running && store.pending() == 0L) return Result.success()
+        if (store.running && !SyncService.isRunning) Scheduler.startService(app, restart = true)
         return if (SyncManager.flushPending(app)) Result.success() else Result.retry()
     }
 }

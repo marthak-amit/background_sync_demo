@@ -49,7 +49,7 @@ class SyncService : Service() {
             val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
             val cb = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
-                    handler.post { try { SyncManager.flushPending(this@SyncService) } catch (e: Exception) { Log.w(TAG, "flush: ${e.message}") } }
+                    SyncManager.requestFlush(this@SyncService) // own thread: never blocks the 60 s loop
                 }
             }
             cm.registerDefaultNetworkCallback(cb)
@@ -81,7 +81,7 @@ class SyncService : Service() {
         if (!loopStarted) {
             loopStarted = true
             nextDue = SystemClock.uptimeMillis()
-            handler.post {
+            Thread { // off the loop thread: reconcile can wait on the network and must not delay tick #1
                 try {
                     ExitReasons.record(this)
                     ManagedMode.apply(this)
@@ -89,7 +89,7 @@ class SyncService : Service() {
                     com.google.firebase.messaging.FirebaseMessaging.getInstance().token
                         .addOnSuccessListener { SyncManager.saveFcmToken(this, it) }
                 } catch (e: Exception) { Log.w(TAG, "startup tasks: ${e.message}") }
-            }
+            }.start()
             handler.post(loop)
         }
         return START_STICKY
@@ -101,7 +101,7 @@ class SyncService : Service() {
             val state = pendingState ?: if (AppForeground.isForeground) Config.STATE_FOREGROUND else Config.STATE_BACKGROUND
             pendingState = null
             try {
-                SyncManager.writeTick(this@SyncService, state)
+                SyncManager.writeTick(this@SyncService, state, waitForFlush = false)
             } catch (e: Exception) {
                 Log.e(TAG, "tick failed", e)
             }

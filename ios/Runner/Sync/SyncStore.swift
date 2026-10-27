@@ -1,6 +1,15 @@
 import Foundation
 import SQLite3
 
+/// A user post (text + optional image) waiting to be uploaded.
+struct PostRow {
+    let id: String
+    let text: String
+    let imagePath: String?
+    let clientTime: Int64
+    let uploadedUrl: String?
+}
+
 struct QueuedRecord {
     let seq: Int64
     let key: String
@@ -28,6 +37,10 @@ final class SyncStore {
             sqlite3_exec(db, """
                 CREATE TABLE IF NOT EXISTS queue(seq INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL,
                 n INTEGER NOT NULL, app_state TEXT NOT NULL, client_time INTEGER NOT NULL, gap INTEGER NOT NULL)
+                """, nil, nil, nil)
+            sqlite3_exec(db, """
+                CREATE TABLE IF NOT EXISTS posts(seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+                text TEXT NOT NULL, image_path TEXT, client_time INTEGER NOT NULL, uploaded_url TEXT)
                 """, nil, nil, nil)
         }
     }
@@ -86,13 +99,61 @@ final class SyncStore {
         sqlite3_exec(db, "DELETE FROM queue WHERE seq=\(seq)", nil, nil, nil)
     }
 
-    func pending() -> Int {
+    /// Heartbeat rows + posts still waiting to reach Firebase.
+    func pending() -> Int { count("queue") + count("posts") }
+
+    private func count(_ table: String) -> Int {
         lock.lock(); defer { lock.unlock() }
         var st: OpaquePointer?
         var n = 0
-        sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM queue", -1, &st, nil)
+        sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM \(table)", -1, &st, nil)
         if sqlite3_step(st) == SQLITE_ROW { n = Int(sqlite3_column_int(st, 0)) }
         sqlite3_finalize(st)
         return n
+    }
+
+    func addPost(id: String, text: String, imagePath: String?, clientTime: Int64) {
+        lock.lock(); defer { lock.unlock() }
+        var st: OpaquePointer?
+        sqlite3_prepare_v2(db, "INSERT INTO posts(id,text,image_path,client_time) VALUES(?,?,?,?)", -1, &st, nil)
+        sqlite3_bind_text(st, 1, id, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(st, 2, text, -1, SQLITE_TRANSIENT)
+        if let p = imagePath { sqlite3_bind_text(st, 3, p, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(st, 3) }
+        sqlite3_bind_int64(st, 4, clientTime)
+        sqlite3_step(st)
+        sqlite3_finalize(st)
+    }
+
+    func pendingPosts() -> [PostRow] {
+        lock.lock(); defer { lock.unlock() }
+        var st: OpaquePointer?
+        var out: [PostRow] = []
+        sqlite3_prepare_v2(db, "SELECT id,text,image_path,client_time,uploaded_url FROM posts ORDER BY seq ASC", -1, &st, nil)
+        func str(_ i: Int32) -> String? { sqlite3_column_text(st, i).map { String(cString: $0) } }
+        while sqlite3_step(st) == SQLITE_ROW {
+            out.append(PostRow(id: str(0) ?? "", text: str(1) ?? "", imagePath: str(2),
+                               clientTime: sqlite3_column_int64(st, 3), uploadedUrl: str(4)))
+        }
+        sqlite3_finalize(st)
+        return out
+    }
+
+    func setPostUrl(_ id: String, _ url: String) {
+        lock.lock(); defer { lock.unlock() }
+        var st: OpaquePointer?
+        sqlite3_prepare_v2(db, "UPDATE posts SET uploaded_url=? WHERE id=?", -1, &st, nil)
+        sqlite3_bind_text(st, 1, url, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(st, 2, id, -1, SQLITE_TRANSIENT)
+        sqlite3_step(st)
+        sqlite3_finalize(st)
+    }
+
+    func deletePost(_ id: String) {
+        lock.lock(); defer { lock.unlock() }
+        var st: OpaquePointer?
+        sqlite3_prepare_v2(db, "DELETE FROM posts WHERE id=?", -1, &st, nil)
+        sqlite3_bind_text(st, 1, id, -1, SQLITE_TRANSIENT)
+        sqlite3_step(st)
+        sqlite3_finalize(st)
     }
 }

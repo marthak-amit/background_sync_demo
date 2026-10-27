@@ -2,16 +2,25 @@ import UIKit
 import Network
 import FirebaseCore
 import FirebaseAuth
-import FirebaseDatabase
+import FirebaseFirestore
+import FirebaseStorage
 import FirebaseMessaging
 
 /// The single write path. Every layer (timer, location, audio, PushKit, silent FCM, BGTask, relaunch)
-/// calls `writeTick`. Flutter never touches this.
+/// calls `writeTick`; user posts go through `submitPost`. Both only touch the local queue first, so nothing
+/// depends on the network. Flutter never touches this.
+///
+/// Firestore: devices/{deviceId} (meta fields), devices/{deviceId}/logs/{id}, devices/{deviceId}/posts/{id}
+/// Storage:   devices/{deviceId}/images/{postId}.jpg
 final class SyncManager {
     static let shared = SyncManager()
 
     private let store = SyncStore.shared
-    private let workQueue = DispatchQueue(label: "sync.work")
+    /// Fast, serial: counter + enqueue only. Never blocked by the network.
+    private let tickQueue = DispatchQueue(label: "sync.tick")
+    /// Serial: all network work (can take up to ~2 min for an upload).
+    private let flushQueue = DispatchQueue(label: "sync.flush")
+    private let tickLock = NSLock()
     private var timer: Timer?
     private var configured = false
     private var observing = false
@@ -31,11 +40,17 @@ final class SyncManager {
             return
         }
         if FirebaseApp.app() == nil { FirebaseApp.configure() }
-        Database.database().isPersistenceEnabled = true // offline persistence
+        // Offline persistence (Firestore's own cache, in addition to our SQLite outbox).
+        let settings = FirestoreSettings()
+        settings.cacheSettings = PersistentCacheSettings()
+        Firestore.firestore().settings = settings
         configured = true
+        startNetworkMonitor()
     }
 
-    /// Blocking; call only from `workQueue` / a background queue. Returns the anonymous uid (= deviceId).
+    private func db() -> Firestore { Firestore.firestore() }
+
+    /// Blocking; call only from a background queue. Returns the anonymous uid (= deviceId).
     func ensureUid() -> String? {
         guard configured else { return nil }
         if let u = Auth.auth().currentUser { store.deviceId = u.uid; return u.uid }
@@ -49,50 +64,69 @@ final class SyncManager {
         return uid
     }
 
-    /// Reconcile local counter with devices/{id}/meta/lastN using a transaction (max of both).
+    /// Runs `body`, which must call its callback exactly once; true only if it reported success in time.
+    private func waitFor(_ timeout: TimeInterval, _ body: (@escaping (Bool) -> Void) -> Void) -> Bool {
+        let sem = DispatchSemaphore(value: 0)
+        var ok = false
+        body { ok = $0; sem.signal() }
+        return sem.wait(timeout: .now() + timeout) == .success && ok
+    }
+
+    /// Reconcile local counter with devices/{id}.lastN using a transaction (max of both).
     func reconcile() {
-        workQueue.async {
-            guard let uid = self.ensureUid() else { return }
+        flushQueue.async {
+            guard self.online, let uid = self.ensureUid() else { return }
+            let ref = self.db().document("devices/\(uid)")
             let sem = DispatchSemaphore(value: 0)
-            Database.database().reference(withPath: "devices/\(uid)/meta/lastN").runTransactionBlock({ data in
-                let remote = (data.value as? NSNumber)?.int64Value ?? 0
-                data.value = max(remote, self.store.lastN)
-                return TransactionResult.success(withValue: data)
-            }, andCompletionBlock: { _, committed, snap in
-                if committed, let merged = (snap?.value as? NSNumber)?.int64Value, merged > self.store.lastN {
-                    self.store.lastN = merged
+            self.db().runTransaction({ tx, errPtr -> Any? in
+                let snap: DocumentSnapshot
+                do { snap = try tx.getDocument(ref) } catch let e as NSError { errPtr?.pointee = e; return nil }
+                let remote = (snap.data()?["lastN"] as? NSNumber)?.int64Value ?? 0
+                let merged = max(remote, self.store.lastN)
+                tx.setData(["lastN": merged], forDocument: ref, merge: true)
+                return merged
+            }) { result, _ in
+                if let m = (result as? NSNumber)?.int64Value {
+                    self.tickLock.lock()
+                    if m > self.store.lastN { self.store.lastN = m }
+                    self.tickLock.unlock()
                 }
                 sem.signal()
-            })
+            }
             _ = sem.wait(timeout: .now() + Config.writeTimeout)
         }
     }
 
-    func saveFcmToken(_ t: String) { store.fcmToken = t; workQueue.async { self.flush() } }
-    func saveVoipToken(_ t: String) { store.voipToken = t; workQueue.async { self.flush() } }
+    func saveFcmToken(_ t: String) { store.fcmToken = t; flushSoon() }
+    func saveVoipToken(_ t: String) { store.voipToken = t; flushSoon() }
 
     // MARK: - writeTick
 
-    /// Layer 3: each write is wrapped in beginBackgroundTask / endBackgroundTask.
-    func writeTick(_ appState: String, completion: (() -> Void)? = nil) {
+    /// Each write is wrapped in beginBackgroundTask / endBackgroundTask (layer 3).
+    /// - waitForFlush: false for the timer, so a slow upload can never delay the next tick.
+    func writeTick(_ appState: String, waitForFlush: Bool = true, completion: (() -> Void)? = nil) {
         DispatchQueue.main.async {
             let app = UIApplication.shared
             var bg = UIBackgroundTaskIdentifier.invalid
-            bg = app.beginBackgroundTask(withName: "sync-write") {
-                app.endBackgroundTask(bg); bg = .invalid
-            }
-            self.workQueue.async {
-                self.performTick(appState)
-                DispatchQueue.main.async {
-                    if bg != .invalid { app.endBackgroundTask(bg) }
-                    completion?()
+            bg = app.beginBackgroundTask(withName: "sync-write") { app.endBackgroundTask(bg); bg = .invalid }
+            let finish = { DispatchQueue.main.async { if bg != .invalid { app.endBackgroundTask(bg); bg = .invalid } } }
+            self.tickQueue.async {
+                self.recordTick(appState)
+                if !waitForFlush { DispatchQueue.main.async { completion?() } }
+                // Even a deduped wake is a free chance to push queued data (posts, offline backlog).
+                self.flushQueue.async {
+                    self.flushAll()
+                    if waitForFlush { DispatchQueue.main.async { completion?() } }
+                    finish()
                 }
             }
         }
     }
 
-    private func performTick(_ appState: String) {
+    /// Counter + local queue only: no network.
+    private func recordTick(_ appState: String) {
         guard configured, store.running else { return }
+        tickLock.lock(); defer { tickLock.unlock() }
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         let prev = store.lastWriteAt
         if prev != 0 && now >= prev && now - prev < Config.dedupeMs {
@@ -101,70 +135,141 @@ final class SyncManager {
         }
         let n = store.lastN + 1
         let gap: Int64 = prev == 0 ? 0 : max(0, (now - prev) / 1000)
-        let key = Database.database().reference().childByAutoId().key ?? UUID().uuidString
         store.lastN = n
         store.lastWriteAt = now
         store.lastAppState = appState
-        store.enqueue(QueuedRecord(seq: 0, key: key, n: n, appState: appState, clientTime: now, gap: gap))
-        flush()
-        NSLog("[Sync] tick Test_%lld (%@) gap=%llds pending=%d", n, appState, gap, store.pending())
+        store.enqueue(QueuedRecord(seq: 0, key: UUID().uuidString.replacingOccurrences(of: "-", with: ""),
+                                   n: n, appState: appState, clientTime: now, gap: gap))
+        NSLog("[Sync] tick Test_%lld (%@) gap=%llds", n, appState, gap)
     }
 
-    /// Send queued records in order; stops at the first failure so ordering is preserved.
-    private func flush() {
-        guard online else { return } // offline: rows stay queued, flushed by the path monitor / next tick
-        guard let uid = ensureUid() else { return }
-        let ref = Database.database().reference(withPath: "devices/\(uid)")
-        var rows = store.peek(50)
-        while !rows.isEmpty {
-            for r in rows {
-                var upd: [String: Any] = [
-                    "logs/\(r.key)": [
-                        "value": "Test_\(r.n)", "n": r.n, "platform": "ios", "appState": r.appState,
-                        "deviceId": uid, "clientTime": r.clientTime,
-                        "timestamp": ServerValue.timestamp(), "gapSeconds": r.gap,
-                    ] as [String: Any],
-                    "meta/lastN": r.n,
-                    "meta/lastWriteAt": ServerValue.timestamp(),
-                    "meta/platform": "ios",
-                ]
-                if let t = store.fcmToken { upd["meta/fcmToken"] = t }
-                if let t = store.voipToken { upd["meta/voipToken"] = t }
-                upd["meta/lowPowerMode"] = Degradation.shared.lowPower
-                upd["meta/bgRefresh"] = Degradation.shared.bgRefresh
-                upd["meta/locationAlways"] = LocationKeepAlive.shared.isAlways
-                let sem = DispatchSemaphore(value: 0)
-                var ok = false
-                ref.updateChildValues(upd) { err, _ in ok = (err == nil); sem.signal() }
-                if sem.wait(timeout: .now() + Config.writeTimeout) == .timedOut || !ok { return }
-                store.delete(r.seq)
-                store.tokensDirty = false
+    // MARK: - User posts
+
+    /// Queue a post (text + optional image file). Works offline: flushed as soon as a network exists.
+    func submitPost(text: String, srcPath: String?) {
+        let id = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        var dest: String?
+        if let src = srcPath, !src.isEmpty {
+            let dir = try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                                   appropriateFor: nil, create: true).appendingPathComponent("outbox")
+            if let dir {
+                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                let f = dir.appendingPathComponent("\(id).jpg") // app-private copy: survives the picker cache being purged
+                try? FileManager.default.removeItem(at: f)
+                if (try? FileManager.default.copyItem(at: URL(fileURLWithPath: src), to: f)) != nil { dest = f.path }
             }
-            rows = store.peek(50)
         }
-        if store.tokensDirty {
-            var meta: [String: Any] = ["platform": "ios", "lowPowerMode": Degradation.shared.lowPower,
-                                       "bgRefresh": Degradation.shared.bgRefresh,
-                                       "locationAlways": LocationKeepAlive.shared.isAlways]
-            if let t = store.fcmToken { meta["fcmToken"] = t }
-            if let t = store.voipToken { meta["voipToken"] = t }
-            let sem = DispatchSemaphore(value: 0)
-            var ok = false
-            ref.child("meta").updateChildValues(meta) { err, _ in ok = (err == nil); sem.signal() }
-            if sem.wait(timeout: .now() + Config.writeTimeout) == .success && ok { store.tokensDirty = false }
-        }
+        store.addPost(id: id, text: text, imagePath: dest, clientTime: Int64(Date().timeIntervalSince1970 * 1000))
+        flushSoon()
     }
 
-    /// Flush queued records inside a background task (used when connectivity returns or flags change).
+    // MARK: - Flushing (all on flushQueue)
+
+    /// Flush queued data inside a background task (connectivity returned, post submitted, token changed).
     func flushSoon() {
         DispatchQueue.main.async {
             let app = UIApplication.shared
             var bg = UIBackgroundTaskIdentifier.invalid
             bg = app.beginBackgroundTask(withName: "sync-flush") { app.endBackgroundTask(bg); bg = .invalid }
-            self.workQueue.async {
-                if self.store.pending() > 0 || self.store.tokensDirty { self.flush() }
-                DispatchQueue.main.async { if bg != .invalid { app.endBackgroundTask(bg) } }
+            self.flushQueue.async {
+                self.flushAll()
+                DispatchQueue.main.async { if bg != .invalid { app.endBackgroundTask(bg); bg = .invalid } }
             }
+        }
+    }
+
+    private func flushAll() {
+        guard configured, store.pending() > 0 || store.tokensDirty else { return }
+        guard online else { return } // offline: stays queued; the path monitor / next tick retries
+        guard let uid = ensureUid() else { return }
+        guard flushLogs(uid), flushPosts(uid) else { return }
+        pushMetaIfDirty(uid)
+        NSLog("[Sync] flush done pending=%d", store.pending())
+    }
+
+    private func metaFields(n: Int64?) -> [String: Any] {
+        var m: [String: Any] = [
+            "platform": "ios",
+            "lowPowerMode": Degradation.shared.lowPower,
+            "bgRefresh": Degradation.shared.bgRefresh,
+            "locationAlways": LocationKeepAlive.shared.isAlways,
+        ]
+        if let n { m["lastN"] = n; m["lastWriteAt"] = FieldValue.serverTimestamp() } // only heartbeats bump lastWriteAt
+        if let t = store.fcmToken { m["fcmToken"] = t }
+        if let t = store.voipToken { m["voipToken"] = t }
+        return m
+    }
+
+    /// Heartbeat rows, oldest first; stops at the first failure so ordering is preserved.
+    private func flushLogs(_ uid: String) -> Bool {
+        let device = db().document("devices/\(uid)")
+        var rows = store.peek(50)
+        while !rows.isEmpty {
+            for r in rows {
+                let rec: [String: Any] = [
+                    "value": "Test_\(r.n)", "n": r.n, "platform": "ios", "appState": r.appState,
+                    "deviceId": uid, "clientTime": r.clientTime,
+                    "timestamp": FieldValue.serverTimestamp(), "gapSeconds": r.gap,
+                ]
+                let batch = db().batch()
+                batch.setData(rec, forDocument: device.collection("logs").document(r.key)) // fixed id: retries are idempotent
+                batch.setData(metaFields(n: r.n), forDocument: device, merge: true)
+                guard waitFor(Config.writeTimeout, { done in batch.commit { done($0 == nil) } }) else { return false }
+                store.delete(r.seq)
+                store.tokensDirty = false
+            }
+            rows = store.peek(50)
+        }
+        return true
+    }
+
+    /// Posts: upload the image to Storage, then write the Firestore document that references it.
+    private func flushPosts(_ uid: String) -> Bool {
+        for p in store.pendingPosts() {
+            var url = p.uploadedUrl
+            let path = "devices/\(uid)/images/\(p.id).jpg"
+            if let ip = p.imagePath, url == nil {
+                if FileManager.default.fileExists(atPath: ip) {
+                    let ref = Storage.storage().reference(withPath: path)
+                    let md = StorageMetadata()
+                    md.contentType = "image/jpeg"
+                    var task: StorageUploadTask?
+                    let uploaded = waitFor(Config.uploadTimeout, { done in
+                        task = ref.putFile(from: URL(fileURLWithPath: ip), metadata: md) { _, err in done(err == nil) }
+                    })
+                    if !uploaded { task?.cancel(); return false }
+                    var link: String?
+                    let gotUrl = waitFor(Config.writeTimeout, { done in
+                        ref.downloadURL { u, err in link = u?.absoluteString; done(err == nil && u != nil) }
+                    })
+                    guard gotUrl, let l = link else { return false }
+                    url = l
+                    store.setPostUrl(p.id, l) // never re-upload once the object exists
+                } else {
+                    url = "" // source file vanished: sync the text on its own
+                }
+            }
+            let hasImage = !(url ?? "").isEmpty
+            var doc: [String: Any] = [
+                "text": p.text, "clientTime": p.clientTime, "timestamp": FieldValue.serverTimestamp(),
+                "deviceId": uid, "platform": "ios",
+            ]
+            if hasImage { doc["imagePath"] = path; doc["imageUrl"] = url! }
+            let ref = db().document("devices/\(uid)/posts/\(p.id)")
+            guard waitFor(Config.writeTimeout, { done in ref.setData(doc) { done($0 == nil) } }) else { return false }
+            if let ip = p.imagePath { try? FileManager.default.removeItem(atPath: ip) }
+            store.deletePost(p.id)
+            NSLog("[Sync] post %@ synced", p.id)
+        }
+        return true
+    }
+
+    /// Token / flag changes with nothing else queued.
+    private func pushMetaIfDirty(_ uid: String) {
+        guard store.tokensDirty else { return }
+        let ref = db().document("devices/\(uid)")
+        if waitFor(Config.writeTimeout, { done in ref.setData(self.metaFields(n: nil), merge: true) { done($0 == nil) } }) {
+            store.tokensDirty = false
         }
     }
 
@@ -192,7 +297,6 @@ final class SyncManager {
         onMain {
             self.store.running = true
             self.configureFirebase()
-            self.startNetworkMonitor()
             Degradation.shared.start()
             self.restartLayers()
             VoipPushHandler.shared.register()
@@ -247,7 +351,7 @@ final class SyncManager {
         // Native 60s timer on the .common run loop mode so it also fires while the UI is tracking.
         let t = Timer(timeInterval: Config.tick, repeats: true) { [weak self] _ in
             let s = UIApplication.shared.applicationState == .active ? "foreground" : "background"
-            self?.writeTick(s)
+            self?.writeTick(s, waitForFlush: false)
         }
         t.tolerance = 0
         RunLoop.main.add(t, forMode: .common)

@@ -6,7 +6,7 @@ environment, so the *Measured* columns are intentionally blank rather than fille
 
 ## Method
 For each platform and each state, start sync, put the device in that state for **60 minutes**, then export
-`devices/<id>` from the Realtime Database console and run:
+the logs with `node tools/export_logs.js <deviceId> export.json` and run:
 
 ```bash
 node tools/analyze_gaps.js export.json --from <startMs> --to <endMs>   # --ontime 75 is the default threshold
@@ -42,9 +42,24 @@ node tools/analyze_gaps.js export.json --from <startMs> --to <endMs>   # --ontim
 | Screen locked 60 min | ≤ 70 s | ≥ 95 % | | | needs Always location |
 | Swipe-kill | ≤ 70 s via VoIP; minutes via region/significant change | VoIP ≥ 90 %, location-only ≪ | | | VoIP push is the only per-minute wake after kill |
 | Reboot (after first unlock) | until unlock | n/a | | | keychain/UserDefaults unreadable before first unlock |
-| Low Power Mode | location/audio/VoIP expected to continue | | | | alert + `meta/lowPowerMode`; untested |
+| Low Power Mode | location/audio/VoIP expected to continue | | | | alert + `lowPowerMode`; untested |
 | Airplane mode 20 min, then online | all queued rows flushed in order | 100 % of `n` present | | | offline queue |
 | Background App Refresh off | BGTask layer dead; others live | | | | see "Known blockers" |
+
+## Posts (image + text) offline test
+
+For each state (foreground, background, locked, killed) and platform: enable airplane mode, submit 3 posts (2 with images),
+confirm they show as `queued`, then disable airplane mode. Expected: all 3 appear in Firestore `devices/<id>/posts` and the images in
+Storage within ~60 s of the network returning (immediately if the app is in the foreground), with the original `clientTime`, no duplicates.
+
+| Platform / state | Posts submitted | Posts synced | Time from network return to last upload | Notes |
+|---|---|---|---|---|
+| Android foreground | | | | |
+| Android background / locked | | | | |
+| Android killed (swipe) | | | | |
+| iOS foreground | | | | |
+| iOS background / locked | | | | |
+| iOS killed (swipe) | | | | |
 
 ## Known blockers and what the app does about them
 
@@ -57,7 +72,7 @@ cancelled and **no broadcast (including FCM and BOOT_COMPLETED) is delivered** u
 * **Eliminated on managed devices (untested):** install as device owner (README → *Managed devices*). The app then calls
   `setUserControlDisabledPackages`, so Force stop and Clear data are disabled for it in Settings. The checklist row
   *Managed device (Force Stop locked)* shows green when active.
-* **Unmanaged devices:** cannot be prevented. Mitigations: (1) next start records `meta/lastExit =
+* **Unmanaged devices:** cannot be prevented. Mitigations: (1) next start records `lastExit =
   USER_REQUESTED_FORCE_STOP@<ms>` so the gap is explained in Firebase; (2) `staleDeviceAlert` queues a visible
   "Sync was force-stopped, open the app" notification; (3) the UI shows the red managed-device row.
 * OEM killers (Xiaomi, Oppo, Vivo, Huawei, Honor, Samsung) behave like a force stop: use the *OEM auto-start* row,
@@ -67,11 +82,11 @@ cancelled and **no broadcast (including FCM and BOOT_COMPLETED) is delivered** u
 * **Low Power Mode** (user setting, cannot be changed by an app): background fetch/BGTasks are suspended and iOS may
   suspend the app. Location and audio keep-alive, the 60 s timer and VoIP push are the layers expected to continue (untested).
   The app posts a local notification immediately when it is turned on, shows a red checklist row, and writes
-  `meta/lowPowerMode`, which the server watchdog turns into "turn off Low Power Mode".
+  `lowPowerMode`, which the server watchdog turns into "turn off Low Power Mode".
 * **Background App Refresh off** disables BGTasks and silent push only. Location, audio and VoIP do not depend on it. Same
-  notification / checklist / `meta/bgRefresh` handling.
+  notification / checklist / `bgRefresh` handling.
 * Not preventable on iOS at all: reboot-before-first-unlock (keychain/Application Support unreadable until unlock, writes
-  resume after), user revoking Location "Always" (alert + `meta/locationAlways`), and the user force-quitting
+  resume after), user revoking Location "Always" (alert + `locationAlways`), and the user force-quitting
   (silent push and BGTasks stop; VoIP push and location relaunch still work).
 
 ### No connectivity (both platforms)

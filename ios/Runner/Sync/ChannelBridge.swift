@@ -1,14 +1,15 @@
 import Flutter
 import UIKit
 import CoreLocation
-import FirebaseDatabase
+import FirebaseFirestore
 
 /// Flutter = UI only. MethodChannel `sync/control` + EventChannel `sync/logs` mirror the Android contract.
-final class ChannelBridge: NSObject, FlutterStreamHandler {
+final class ChannelBridge: NSObject {
     static let shared = ChannelBridge()
 
-    private var query: DatabaseQuery?
-    private var handle: UInt?
+    // Held strongly: FlutterEventChannel keeps its handler weakly.
+    private let logsStream = QueryStream(sub: "logs", field: "n")
+    private let postsStream = QueryStream(sub: "posts", field: "clientTime")
 
     func setup(messenger: FlutterBinaryMessenger) {
         let ch = FlutterMethodChannel(name: "sync/control", binaryMessenger: messenger)
@@ -18,11 +19,22 @@ final class ChannelBridge: NSObject, FlutterStreamHandler {
             case "stop": SyncManager.shared.stopAll(); result(true)
             case "status": result(Self.status())
             case "permissions": result(Self.permissions())
+            case "submitPost":
+                let a = call.arguments as? [String: Any] ?? [:]
+                let text = ((a["text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let path = a["path"] as? String
+                if text.isEmpty && (path ?? "").isEmpty {
+                    result(FlutterError(code: "empty", message: "Nothing to post", details: nil))
+                } else {
+                    SyncManager.shared.submitPost(text: text, srcPath: path)
+                    result(true)
+                }
             case "fix": Self.fix(call.arguments as? String ?? ""); result(true)
             default: result(FlutterMethodNotImplemented)
             }
         }
-        FlutterEventChannel(name: "sync/logs", binaryMessenger: messenger).setStreamHandler(self)
+        FlutterEventChannel(name: "sync/logs", binaryMessenger: messenger).setStreamHandler(logsStream)
+        FlutterEventChannel(name: "sync/posts", binaryMessenger: messenger).setStreamHandler(postsStream)
     }
 
     private static func status() -> [String: Any] {
@@ -32,6 +44,9 @@ final class ChannelBridge: NSObject, FlutterStreamHandler {
         return [
             "running": s.running, "n": s.lastN, "lastWriteAt": s.lastWriteAt,
             "lastAppState": s.lastAppState, "pending": s.pending(),
+            "outbox": s.pendingPosts().map { p -> [String: Any] in
+                ["id": p.id, "text": p.text, "imagePath": p.imagePath as Any, "clientTime": p.clientTime]
+            },
             "layers": [
                 layer("1 Continuous location (Always)", s.running && loc.isAlways),
                 layer("2 Silent audio loop", Config.AUDIO_ENABLED && SilentAudio.shared.isPlaying),
@@ -71,31 +86,45 @@ final class ChannelBridge: NSObject, FlutterStreamHandler {
         }
         if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
     }
+}
 
-    // MARK: FlutterStreamHandler (live last-30 list)
+/// Live last-30 Firestore query (includes local pending writes, so it also works offline).
+final class QueryStream: NSObject, FlutterStreamHandler {
+    private let sub: String
+    private let field: String
+    private var reg: ListenerRegistration?
+
+    init(sub: String, field: String) { self.sub = sub; self.field = field }
 
     func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
         DispatchQueue.global().async {
             guard let uid = SyncManager.shared.ensureUid() else { return }
             DispatchQueue.main.async {
-                let q = Database.database().reference(withPath: "devices/\(uid)/logs").queryOrderedByKey().queryLimited(toLast: 30)
-                self.query = q
-                self.handle = q.observe(.value) { snap in
-                    var rows: [[String: Any]] = []
-                    for c in snap.children {
-                        if let s = c as? DataSnapshot, let m = s.value as? [String: Any] { rows.append(m) }
+                self.reg = Firestore.firestore().collection("devices/\(uid)/\(self.sub)")
+                    .order(by: self.field, descending: true).limit(to: 30)
+                    .addSnapshotListener(includeMetadataChanges: true) { snap, err in
+                        guard let snap, err == nil else {
+                            events(FlutterError(code: "firestore", message: err?.localizedDescription, details: nil)); return
+                        }
+                        events(snap.documents.map { Self.plain($0) })
                     }
-                    rows.sort { (($0["n"] as? NSNumber)?.int64Value ?? 0) > (($1["n"] as? NSNumber)?.int64Value ?? 0) }
-                    events(rows)
-                }
             }
         }
         return nil
     }
 
     func onCancel(withArguments arguments: Any?) -> FlutterError? {
-        if let q = query, let h = handle { q.removeObserver(withHandle: h) }
-        query = nil; handle = nil
+        reg?.remove(); reg = nil
         return nil
+    }
+
+    private static func plain(_ d: QueryDocumentSnapshot) -> [String: Any] {
+        var m: [String: Any] = [:]
+        for (k, v) in d.data(with: .estimate) {
+            if let t = v as? Timestamp { m[k] = Int64(t.dateValue().timeIntervalSince1970 * 1000) } else { m[k] = v }
+        }
+        m["id"] = d.documentID
+        m["pendingWrite"] = d.metadata.hasPendingWrites
+        return m
     }
 }

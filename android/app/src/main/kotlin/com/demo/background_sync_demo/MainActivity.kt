@@ -11,10 +11,12 @@ import android.os.PowerManager
 import android.provider.Settings
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import com.google.firebase.database.DataSnapshot
-import com.google.firebase.database.DatabaseError
-import com.google.firebase.database.Query
-import com.google.firebase.database.ValueEventListener
+import com.google.firebase.Timestamp
+import com.google.firebase.firestore.DocumentSnapshot
+import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.ListenerRegistration
+import com.google.firebase.firestore.MetadataChanges
+import com.google.firebase.firestore.Query
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
@@ -23,10 +25,8 @@ import java.util.concurrent.Executors
 
 /** Flutter = UI only. Everything real happens in SyncManager / SyncService; this just bridges. */
 class MainActivity : FlutterActivity() {
-    private val io = Executors.newSingleThreadExecutor()
+    private val io = Executors.newCachedThreadPool()
     private val main = Handler(Looper.getMainLooper())
-    private var logQuery: Query? = null
-    private var logListener: ValueEventListener? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -56,36 +56,53 @@ class MainActivity : FlutterActivity() {
                 }
                 "status" -> result.success(status())
                 "permissions" -> result.success(permissions())
+                "submitPost" -> {
+                    val text = (call.argument<String>("text") ?: "").trim()
+                    val path = call.argument<String>("path")
+                    if (text.isEmpty() && path.isNullOrEmpty()) { result.error("empty", "Nothing to post", null) }
+                    else {
+                        io.execute { SyncManager.submitPost(this, text, path) }
+                        result.success(true)
+                    }
+                }
                 "fix" -> { fix(call.arguments as String); result.success(true) }
                 else -> result.notImplemented()
             }
         }
 
-        EventChannel(messenger, "sync/logs").setStreamHandler(object : EventChannel.StreamHandler {
-            override fun onListen(args: Any?, sink: EventChannel.EventSink) {
-                io.execute {
-                    val uid = SyncManager.ensureAuth(this@MainActivity) ?: return@execute
-                    val q = SyncManager.logsRef(uid).orderByKey().limitToLast(30)
-                    val l = object : ValueEventListener {
-                        override fun onDataChange(s: DataSnapshot) {
-                            val rows = s.children.mapNotNull { c ->
-                                val m = c.value as? Map<*, *> ?: return@mapNotNull null
-                                m.entries.associate { it.key.toString() to it.value }
-                            }.sortedByDescending { (it["n"] as? Number)?.toLong() ?: 0L }
-                            main.post { sink.success(rows) }
+        EventChannel(messenger, "sync/logs").setStreamHandler(QueryStream("logs", "n"))
+        EventChannel(messenger, "sync/posts").setStreamHandler(QueryStream("posts", "clientTime"))
+    }
+
+    /** Live last-30 Firestore query (includes local pending writes, so it also works offline). */
+    private inner class QueryStream(private val sub: String, private val orderField: String) : EventChannel.StreamHandler {
+        private var reg: ListenerRegistration? = null
+
+        override fun onListen(args: Any?, sink: EventChannel.EventSink) {
+            io.execute {
+                val uid = SyncManager.ensureAuth(this@MainActivity) ?: return@execute
+                main.post {
+                    reg = FirebaseFirestore.getInstance().collection("devices/$uid/$sub")
+                        .orderBy(orderField, Query.Direction.DESCENDING).limit(30)
+                        .addSnapshotListener(MetadataChanges.INCLUDE) { snap, err ->
+                            if (err != null || snap == null) { sink.error("firestore", err?.message, null); return@addSnapshotListener }
+                            sink.success(snap.documents.map { plain(it) })
                         }
-                        override fun onCancelled(e: DatabaseError) { main.post { sink.error("db", e.message, null) } }
-                    }
-                    logQuery = q; logListener = l
-                    q.addValueEventListener(l)
                 }
             }
+        }
 
-            override fun onCancel(args: Any?) {
-                logListener?.let { logQuery?.removeEventListener(it) }
-                logQuery = null; logListener = null
-            }
-        })
+        override fun onCancel(args: Any?) { reg?.remove(); reg = null }
+    }
+
+    private fun plain(d: DocumentSnapshot): Map<String, Any?> {
+        val m = HashMap<String, Any?>()
+        d.getData(DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)?.forEach { (k, v) ->
+            m[k] = if (v is Timestamp) v.toDate().time else v
+        }
+        m["id"] = d.id
+        m["pendingWrite"] = d.metadata.hasPendingWrites()
+        return m
     }
 
     private fun status(): Map<String, Any?> {
@@ -97,6 +114,9 @@ class MainActivity : FlutterActivity() {
             "lastWriteAt" to s.lastWriteAt,
             "lastAppState" to s.lastAppState,
             "pending" to s.pending(),
+            "outbox" to s.pendingPosts().map {
+                mapOf("id" to it.id, "text" to it.text, "imagePath" to it.imagePath, "clientTime" to it.clientTime)
+            },
             "layers" to listOf(
                 layer("1 Foreground service (dataSync)", SyncService.isRunning),
                 layer("2 Wake lock per write", s.running),

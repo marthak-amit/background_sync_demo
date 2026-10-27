@@ -101,7 +101,6 @@ object Scheduler {
         am.cancel(pi(ctx, ACTION_WATCHDOG_CLOCK, RC_CLOCK))
         am.cancel(pi(ctx, ACTION_RESTART, RC_RESTART))
         WorkManager.getInstance(ctx).cancelUniqueWork(WORK_NAME)
-        WorkManager.getInstance(ctx).cancelUniqueWork("bgsync-flush")
         SyncStore.get(ctx).apply { workerScheduled = false; watchdogNextAt = 0 }
     }
 

@@ -1,11 +1,14 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
 
 /// Flutter is UI only: all timers and Firebase writes live in native Kotlin / Swift.
 const _control = MethodChannel('sync/control');
 const _logs = EventChannel('sync/logs');
+const _postsChannel = EventChannel('sync/posts');
 
 void main() => runApp(const SyncApp());
 
@@ -31,9 +34,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Map<String, dynamic> _status = {};
   List<Map<String, dynamic>> _perms = [];
   List<Map<String, dynamic>> _rows = [];
+  List<Map<String, dynamic>> _posts = [];
   String? _logError;
   Timer? _poll;
   StreamSubscription? _sub;
+  StreamSubscription? _postSub;
+  final _text = TextEditingController();
+  String? _pickedPath;
+  bool _submitting = false;
 
   @override
   void initState() {
@@ -48,6 +56,32 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }),
       onError: (e) => setState(() => _logError = '$e'),
     );
+    _postSub = _postsChannel.receiveBroadcastStream().listen(
+      (e) => setState(() => _posts =
+          (e as List).map((r) => Map<String, dynamic>.from(r as Map)).toList()),
+      onError: (_) {},
+    );
+  }
+
+  Future<void> _pick() async {
+    // Compressed on pick so the queued file is small and uploads fast on a weak connection.
+    final x = await ImagePicker().pickImage(
+        source: ImageSource.gallery, maxWidth: 1600, maxHeight: 1600, imageQuality: 80);
+    if (x != null) setState(() => _pickedPath = x.path);
+  }
+
+  Future<void> _submit() async {
+    if (_text.text.trim().isEmpty && _pickedPath == null) return;
+    setState(() => _submitting = true);
+    try {
+      // Native copies the image into its own outbox and uploads when a network exists (offline is fine).
+      await _control.invokeMethod('submitPost', {'text': _text.text, 'path': _pickedPath});
+      _text.clear();
+      setState(() => _pickedPath = null);
+      await _refresh();
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
   }
 
   @override
@@ -55,6 +89,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _poll?.cancel();
     _sub?.cancel();
+    _postSub?.cancel();
+    _text.dispose();
     super.dispose();
   }
 
@@ -108,6 +144,44 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   ' · queued offline: ${_status['pending'] ?? 0}'),
             ),
           ),
+          const _Header('New post (works offline)'),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                TextField(
+                  controller: _text,
+                  minLines: 1,
+                  maxLines: 4,
+                  decoration: const InputDecoration(labelText: 'Text', border: OutlineInputBorder()),
+                ),
+                if (_pickedPath != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Image.file(File(_pickedPath!), height: 120, fit: BoxFit.cover),
+                  ),
+                const SizedBox(height: 8),
+                Row(children: [
+                  OutlinedButton.icon(
+                      onPressed: _pick, icon: const Icon(Icons.image), label: Text(_pickedPath == null ? 'Pick image' : 'Change image')),
+                  const SizedBox(width: 8),
+                  FilledButton.icon(
+                      onPressed: _submitting ? null : _submit, icon: const Icon(Icons.cloud_upload), label: const Text('Submit')),
+                ]),
+                if (!_running)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 8),
+                    child: Text('Tip: tap Start sync so queued posts also upload while the app is closed.',
+                        style: TextStyle(fontSize: 12)),
+                  ),
+              ]),
+            ),
+          ),
+          if (((_status['outbox'] as List?) ?? []).isNotEmpty) const _Header('Waiting to upload'),
+          for (final o in ((_status['outbox'] as List?) ?? []).cast<Map>())
+            _PostTile(Map<String, dynamic>.from(o), queued: true),
+          const _Header('Posts'),
+          for (final p in _posts) _PostTile(p, queued: p['pendingWrite'] == true),
           const _Header('Permission checklist'),
           for (final p in _perms)
             ListTile(
@@ -173,6 +247,37 @@ class _LogTile extends StatelessWidget {
         subtitle: Text('$time · ${r['platform']}'),
         trailing: Text('gap ${gap}s',
             style: TextStyle(color: bad ? Colors.red : null, fontWeight: bad ? FontWeight.bold : null)),
+      ),
+    );
+  }
+}
+
+class _PostTile extends StatelessWidget {
+  const _PostTile(this.p, {required this.queued});
+  final Map<String, dynamic> p;
+  final bool queued;
+
+  @override
+  Widget build(BuildContext context) {
+    final local = p['imagePath'] is String && File(p['imagePath'] as String).existsSync();
+    final url = p['imageUrl'] as String?;
+    final t = (p['clientTime'] as num?)?.toInt();
+    final time = t == null ? '' : DateTime.fromMillisecondsSinceEpoch(t).toLocal().toString().substring(0, 19);
+    Widget? thumb;
+    if (queued && local) {
+      thumb = Image.file(File(p['imagePath'] as String), width: 56, height: 56, fit: BoxFit.cover);
+    } else if (url != null && url.isNotEmpty) {
+      thumb = Image.network(url, width: 56, height: 56, fit: BoxFit.cover,
+          errorBuilder: (_, _, _) => const Icon(Icons.broken_image));
+    }
+    return Card(
+      child: ListTile(
+        leading: thumb,
+        title: Text((p['text'] as String?)?.isEmpty ?? true ? '(image)' : p['text'] as String),
+        subtitle: Text(time),
+        trailing: queued
+            ? const Chip(label: Text('queued', style: TextStyle(fontSize: 11)), avatar: Icon(Icons.schedule, size: 16))
+            : const Icon(Icons.cloud_done, color: Colors.green),
       ),
     );
   }
