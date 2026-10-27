@@ -1,6 +1,8 @@
 package com.demo.background_sync_demo
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
@@ -44,6 +46,27 @@ object SyncManager {
     }
 
     private fun db() = FirebaseDatabase.getInstance()
+
+    /**
+     * Cheap "is there any network" check used only to fail fast (no 20 s wait per tick while offline).
+     * Deliberately not requiring VALIDATED: a false negative would block writes, a false positive only costs a timeout.
+     */
+    fun isOnline(ctx: Context): Boolean {
+        val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork ?: return false) ?: return false
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }
+
+    /** Flush whatever is queued (called when connectivity returns). Off the main thread. */
+    fun flushPending(ctx: Context): Boolean {
+        val app = ctx.applicationContext
+        if (!init(app)) return false
+        val store = SyncStore.get(app)
+        if (store.pending() == 0L && !store.fcmDirty) return true
+        val ok = flush(app, store)
+        Log.i(TAG, "flushPending ok=$ok pending=${store.pending()}")
+        return ok
+    }
 
     fun logsRef(uid: String) = db().getReference("devices/$uid/logs")
 
@@ -113,7 +136,7 @@ object SyncManager {
                 store.lastWriteAt = now
                 store.lastAppState = appState
                 store.enqueue(QueuedRecord(0, key, n, appState, now, gap))
-                flush(app, store)
+                if (!flush(app, store)) Scheduler.enqueueFlushWhenOnline(app) // survives service death
                 Log.i(TAG, "tick Test_$n ($appState) gap=${gap}s pending=${store.pending()}")
                 return true
             } finally {
@@ -124,6 +147,7 @@ object SyncManager {
 
     /** Send queued records in order; stops at the first failure so ordering is preserved. */
     fun flush(ctx: Context, store: SyncStore): Boolean = synchronized(lock) {
+        if (!isOnline(ctx)) return false // offline: keep the rows queued, retried on network-available / next tick
         val uid = ensureAuth(ctx) ?: return false
         val ref = db().getReference("devices/$uid")
         var rows = store.peek(Config.FLUSH_BATCH)
@@ -143,6 +167,7 @@ object SyncManager {
                     "meta/lastWriteAt" to ServerValue.TIMESTAMP,
                     "meta/platform" to "android",
                 )
+                store.lastExit?.let { upd["meta/lastExit"] = it }
                 store.fcmToken?.let { upd["meta/fcmToken"] = it }
                 val latch = CountDownLatch(1)
                 var ok = false
@@ -159,7 +184,10 @@ object SyncManager {
     private fun pushMeta(store: SyncStore, ref: com.google.firebase.database.DatabaseReference): Boolean {
         val latch = CountDownLatch(1)
         var ok = false
-        ref.child("meta").updateChildren(mapOf("fcmToken" to store.fcmToken, "platform" to "android")) { e, _ ->
+        val meta = hashMapOf<String, Any>("platform" to "android")
+        store.fcmToken?.let { meta["fcmToken"] = it }
+        store.lastExit?.let { meta["lastExit"] = it }
+        ref.child("meta").updateChildren(meta) { e, _ ->
             ok = e == null; latch.countDown()
         }
         if (latch.await(Config.WRITE_TIMEOUT_S, TimeUnit.SECONDS) && ok) store.fcmDirty = false

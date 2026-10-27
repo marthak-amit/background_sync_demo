@@ -1,4 +1,5 @@
 import UIKit
+import Network
 import FirebaseCore
 import FirebaseAuth
 import FirebaseDatabase
@@ -14,6 +15,9 @@ final class SyncManager {
     private var timer: Timer?
     private var configured = false
     private var observing = false
+    private let monitor = NWPathMonitor()
+    private var monitorStarted = false
+    private(set) var online = true
 
     var isConfigured: Bool { configured }
     var timerActive: Bool { timer?.isValid ?? false }
@@ -108,6 +112,7 @@ final class SyncManager {
 
     /// Send queued records in order; stops at the first failure so ordering is preserved.
     private func flush() {
+        guard online else { return } // offline: rows stay queued, flushed by the path monitor / next tick
         guard let uid = ensureUid() else { return }
         let ref = Database.database().reference(withPath: "devices/\(uid)")
         var rows = store.peek(50)
@@ -125,6 +130,9 @@ final class SyncManager {
                 ]
                 if let t = store.fcmToken { upd["meta/fcmToken"] = t }
                 if let t = store.voipToken { upd["meta/voipToken"] = t }
+                upd["meta/lowPowerMode"] = Degradation.shared.lowPower
+                upd["meta/bgRefresh"] = Degradation.shared.bgRefresh
+                upd["meta/locationAlways"] = LocationKeepAlive.shared.isAlways
                 let sem = DispatchSemaphore(value: 0)
                 var ok = false
                 ref.updateChildValues(upd) { err, _ in ok = (err == nil); sem.signal() }
@@ -135,7 +143,9 @@ final class SyncManager {
             rows = store.peek(50)
         }
         if store.tokensDirty {
-            var meta: [String: Any] = ["platform": "ios"]
+            var meta: [String: Any] = ["platform": "ios", "lowPowerMode": Degradation.shared.lowPower,
+                                       "bgRefresh": Degradation.shared.bgRefresh,
+                                       "locationAlways": LocationKeepAlive.shared.isAlways]
             if let t = store.fcmToken { meta["fcmToken"] = t }
             if let t = store.voipToken { meta["voipToken"] = t }
             let sem = DispatchSemaphore(value: 0)
@@ -143,6 +153,32 @@ final class SyncManager {
             ref.child("meta").updateChildValues(meta) { err, _ in ok = (err == nil); sem.signal() }
             if sem.wait(timeout: .now() + Config.writeTimeout) == .success && ok { store.tokensDirty = false }
         }
+    }
+
+    /// Flush queued records inside a background task (used when connectivity returns or flags change).
+    func flushSoon() {
+        DispatchQueue.main.async {
+            let app = UIApplication.shared
+            var bg = UIBackgroundTaskIdentifier.invalid
+            bg = app.beginBackgroundTask(withName: "sync-flush") { app.endBackgroundTask(bg); bg = .invalid }
+            self.workQueue.async {
+                if self.store.pending() > 0 || self.store.tokensDirty { self.flush() }
+                DispatchQueue.main.async { if bg != .invalid { app.endBackgroundTask(bg) } }
+            }
+        }
+    }
+
+    /// Offline layer: the moment any network path appears, flush whatever is queued.
+    private func startNetworkMonitor() {
+        guard !monitorStarted else { return }
+        monitorStarted = true
+        monitor.pathUpdateHandler = { [weak self] path in
+            guard let self else { return }
+            let was = self.online
+            self.online = path.status == .satisfied
+            if self.online && !was { self.flushSoon() }
+        }
+        monitor.start(queue: DispatchQueue(label: "sync.net"))
     }
 
     // MARK: - Layer lifecycle (call on main)
@@ -156,6 +192,8 @@ final class SyncManager {
         onMain {
             self.store.running = true
             self.configureFirebase()
+            self.startNetworkMonitor()
+            Degradation.shared.start()
             self.restartLayers()
             VoipPushHandler.shared.register()
             UIApplication.shared.registerForRemoteNotifications() // silent FCM push (layer 6)
@@ -180,6 +218,7 @@ final class SyncManager {
             SilentAudio.shared.start()
             self.startTimer()
             BGTasks.schedule()
+            Degradation.shared.notifyIfDegraded()
         }
     }
 

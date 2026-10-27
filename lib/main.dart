@@ -161,7 +161,7 @@ class _LogTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final gap = (r['gapSeconds'] as num?)?.toInt() ?? 0;
     final bad = gap > 90;
-    final t = (r['timestamp'] ?? r['clientTime']) as num?;
+    final t = (r['clientTime'] ?? r['timestamp']) as num?;
     final time = t == null
         ? '…'
         : DateTime.fromMillisecondsSinceEpoch(t.toInt()).toLocal().toString().substring(11, 19);

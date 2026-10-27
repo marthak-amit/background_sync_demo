@@ -69,6 +69,14 @@ class SyncStore private constructor(ctx: Context) :
         get() = prefs.getBoolean("oemAck", false)
         set(v) { prefs.edit().putBoolean("oemAck", v).apply() }
 
+    var lastExit: String?
+        get() = prefs.getString("lastExit", null)
+        set(v) { prefs.edit().putString("lastExit", v).commit() }
+
+    var exitSeenAt: Long
+        get() = prefs.getLong("exitSeenAt", 0L)
+        set(v) { prefs.edit().putLong("exitSeenAt", v).commit() }
+
     var lastAppState: String
         get() = prefs.getString("lastAppState", "-") ?: "-"
         set(v) { prefs.edit().putString("lastAppState", v).apply() }

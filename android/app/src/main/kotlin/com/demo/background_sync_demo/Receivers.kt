@@ -55,3 +55,13 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params) {
         return Result.success()
     }
 }
+
+/** Runs as soon as a network is available while records are queued (see Scheduler.enqueueFlushWhenOnline). */
+class FlushWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params) {
+    override fun doWork(): Result {
+        val app = applicationContext
+        if (!SyncStore.get(app).running) return Result.success()
+        if (!SyncService.isRunning) Scheduler.startService(app, restart = true)
+        return if (SyncManager.flushPending(app)) Result.success() else Result.retry()
+    }
+}

@@ -24,6 +24,7 @@
 		BB0005000000000000000005 /* VoipPushHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0005000000000000000005 /* VoipPushHandler.swift */; };
 		BB0006000000000000000006 /* BackgroundTasks.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0006000000000000000006 /* BackgroundTasks.swift */; };
 		BB0007000000000000000007 /* ChannelBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0007000000000000000007 /* ChannelBridge.swift */; };
+		BB0008000000000000000008 /* Degradation.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0008000000000000000008 /* Degradation.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -76,6 +77,7 @@
 		AA0006000000000000000006 /* BackgroundTasks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundTasks.swift; sourceTree = "<group>"; };
 		AA0007000000000000000007 /* ChannelBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChannelBridge.swift; sourceTree = "<group>"; };
 		CC0000000000000000000001 /* Runner.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Runner.entitlements; sourceTree = "<group>"; };
+		AA0008000000000000000008 /* Degradation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Degradation.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -158,6 +160,7 @@
 				AA0005000000000000000005 /* VoipPushHandler.swift */,
 				AA0006000000000000000006 /* BackgroundTasks.swift */,
 				AA0007000000000000000007 /* ChannelBridge.swift */,
+				AA0008000000000000000008 /* Degradation.swift */,
 			);
 			path = Sync;
 			sourceTree = "<group>";
@@ -342,6 +345,7 @@
 				BB0005000000000000000005 /* VoipPushHandler.swift in Sources */,
 				BB0006000000000000000006 /* BackgroundTasks.swift in Sources */,
 				BB0007000000000000000007 /* ChannelBridge.swift in Sources */,
+				BB0008000000000000000008 /* Degradation.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

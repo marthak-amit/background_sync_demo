@@ -61,6 +61,48 @@ background, the alarm / WorkManager / FCM layers still call `writeTick` directly
 | 8 | Info.plist: `UIBackgroundModes` = location, audio, fetch, processing, remote-notification, voip; location usage strings; `BGTaskSchedulerPermittedIdentifiers` | `Info.plist` |
 | 9 | Entitlement `aps-environment`; Background Modes are the plist keys above | `Runner.entitlements` |
 
+## Offline and "must not lose data" behaviour
+
+Remote units will often have no connectivity. Writes are therefore **never dependent on the network**:
+every tick is persisted (counter + SQLite row) before any network call, so nothing is lost while offline.
+
+* No network → the tick is queued and returns immediately (no 20 s stall per tick).
+* The moment any network appears the queue is flushed in order, by three independent triggers:
+  Android `NetworkCallback` in the service, a WorkManager job with a `CONNECTED` constraint (survives the service
+  dying and reboots), and the next tick; iOS `NWPathMonitor` (inside a background task) and the next tick.
+* Push keys are generated at write time, so a retried flush is idempotent (no duplicates), and `n` never repeats.
+* `clientTime` is the real capture time; `timestamp` is the server time at upload (later when it was queued).
+  The UI and `analyze_gaps.js` use `clientTime`.
+
+## Surviving what the OS tries to block
+
+| Blocker | Can an app defeat it? | What this repo does |
+|---|---|---|
+| Android **Force Stop** / Clear data | **Only on a managed device.** Stopped packages receive no alarms, jobs, services, broadcasts or FCM, so no app code can survive it. | **Device-owner mode** (below) greys out Force Stop and Clear data for the app. Elsewhere: `ExitReasons` writes `meta/lastExit = USER_REQUESTED_FORCE_STOP@…` on the next start, the checklist shows a red row, and `staleDeviceAlert` notifies the user. |
+| iOS **Low Power Mode** | No. Only the user can change it. | Layers that LPM leaves running (location, audio, VoIP, timer) stay on; `Degradation.swift` posts a local notification the moment it turns on, shows a red checklist row, and reports `meta/lowPowerMode`. |
+| iOS **Background App Refresh off** | No. | It only disables the BGTask and silent-push layers; location, audio and VoIP do not use it. Same alert + `meta/bgRefresh`. |
+| iOS user force-quits | Partly | VoIP push + location relaunch still wake the app. |
+
+`staleDeviceAlert` (Cloud Function, every 5 min) sends a visible notification to any device that has not written
+for 3 min, with the specific instruction (turn off Low Power Mode / enable Background App Refresh / reopen after force stop).
+
+### Managed devices (Android Force Stop lock)
+For remote units you control, make the app the **device owner**. The app then calls
+`setUserControlDisabledPackages` (Android 11+), which disables *Force stop* and *Clear data* for it, and pre-grants the notification permission.
+Choose one provisioning route:
+
+* **Fresh or factory-reset device, over USB (no accounts may be signed in):**
+  ```bash
+  adb install -r build/app/outputs/flutter-apk/app-release.apk
+  adb shell dpm set-device-owner com.demo.background_sync_demo/.SyncDeviceAdminReceiver
+  ```
+  Open the app: the checklist row *Managed device (Force Stop locked)* turns green.
+* **Fleet:** provision with a QR code / zero-touch / any EMM that can set this component as device owner
+  (`com.demo.background_sync_demo/.SyncDeviceAdminReceiver`, APK served from a URL).
+* To undo: `adb shell dpm remove-active-admin com.demo.background_sync_demo/.SyncDeviceAdminReceiver` (a factory reset otherwise).
+
+This does not stop the user from powering the phone off, uninstalling (device owner can also block that via an EMM), or a vendor "app cleaner".
+
 ## Setup
 
 Prerequisites: Flutter (stable), Android SDK / JDK 17, Xcode + CocoaPods (iOS), Node 22 + Firebase CLI.

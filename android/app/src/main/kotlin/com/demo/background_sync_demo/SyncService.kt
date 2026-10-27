@@ -9,6 +9,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
@@ -29,6 +31,7 @@ class SyncService : Service() {
     private var nextDue = 0L
     @Volatile private var pendingState: String? = null
     private var loopStarted = false
+    private var netCallback: ConnectivityManager.NetworkCallback? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -37,6 +40,23 @@ class SyncService : Service() {
         handler = Handler(thread.looper)
         createChannel()
         enterForeground("Sync running")
+        registerNetworkWatcher()
+    }
+
+    /** Offline layer: the instant a network appears, flush the queued records (do not wait for the next tick). */
+    private fun registerNetworkWatcher() {
+        try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val cb = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    handler.post { try { SyncManager.flushPending(this@SyncService) } catch (e: Exception) { Log.w(TAG, "flush: ${e.message}") } }
+                }
+            }
+            cm.registerDefaultNetworkCallback(cb)
+            netCallback = cb
+        } catch (e: Exception) {
+            Log.w(TAG, "network watcher: ${e.message}")
+        }
     }
 
     private fun enterForeground(text: String) {
@@ -63,6 +83,8 @@ class SyncService : Service() {
             nextDue = SystemClock.uptimeMillis()
             handler.post {
                 try {
+                    ExitReasons.record(this)
+                    ManagedMode.apply(this)
                     SyncManager.reconcile(this)
                     com.google.firebase.messaging.FirebaseMessaging.getInstance().token
                         .addOnSuccessListener { SyncManager.saveFcmToken(this, it) }
@@ -147,6 +169,7 @@ class SyncService : Service() {
 
     override fun onDestroy() {
         isRunning = false
+        netCallback?.let { try { (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(it) } catch (_: Exception) {} }
         handler.removeCallbacksAndMessages(null)
         thread.quitSafely()
         wakeLock?.let { if (it.isHeld) it.release() }

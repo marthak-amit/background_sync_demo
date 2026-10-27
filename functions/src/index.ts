@@ -20,6 +20,12 @@ interface Meta {
   platform?: "android" | "ios";
   fcmToken?: string;
   voipToken?: string;
+  lastWriteAt?: number;
+  lastAlertAt?: number;
+  lastExit?: string; // Android: why the previous process died, e.g. USER_REQUESTED_FORCE_STOP@<ms>
+  lowPowerMode?: boolean; // iOS
+  bgRefresh?: boolean; // iOS
+  locationAlways?: boolean; // iOS
 }
 
 const CONCURRENCY = 25;
@@ -175,5 +181,57 @@ export const syncTick = onSchedule(
       }
     }
     logger.info("syncTick done", { devices: metas.size, voip: voip.length });
+  },
+);
+
+// ---------------------------------------------------------------- stale-device watchdog
+
+const STALE_MS = 3 * 60_000;
+const ALERT_COOLDOWN_MS = 30 * 60_000;
+
+/** Turns the device's self-reported state into the one instruction the user needs. */
+function staleMessage(m: Meta): string {
+  if (m.platform === "ios") {
+    if (m.lowPowerMode) return "Sync paused: turn off Low Power Mode, then open the app.";
+    if (m.bgRefresh === false) return "Sync paused: turn on Background App Refresh for this app, then open the app.";
+    if (m.locationAlways === false) return "Sync paused: set Location access to Always, then open the app.";
+  } else if (m.lastExit?.startsWith("USER_REQUESTED_FORCE_STOP")) {
+    return "Sync was force-stopped. Open the app and tap Start sync.";
+  }
+  return "Background sync stopped. Open the app to resume.";
+}
+
+/**
+ * Every 5 min: any device that has not written for 3+ min gets a VISIBLE notification saying what to fix.
+ * Visible alerts are not subject to Background App Refresh / Low Power Mode. They cannot reach a force-stopped
+ * Android app or a phone with no connectivity; FCM holds them (ttl 1 h) until the device is reachable again.
+ */
+export const staleDeviceAlert = onSchedule(
+  { schedule: "every 5 minutes", timeoutSeconds: 120, memory: "256MiB" },
+  async () => {
+    const ids = await deviceIds();
+    const now = Date.now();
+    let alerted = 0;
+    await pool(ids, async (id) => {
+      const snap = await admin.database().ref(`devices/${id}/meta`).get();
+      if (!snap.exists()) return;
+      const m = snap.val() as Meta;
+      if (!m.fcmToken || !m.lastWriteAt || now - m.lastWriteAt < STALE_MS) return;
+      if (m.lastAlertAt && now - m.lastAlertAt < ALERT_COOLDOWN_MS) return;
+      const body = staleMessage(m);
+      try {
+        await admin.messaging().send({
+          token: m.fcmToken,
+          notification: { title: "Background sync", body },
+          android: { priority: "high", ttl: 3_600_000, notification: { channelId: "bgsync" } },
+          apns: { headers: { "apns-priority": "10", "apns-push-type": "alert" }, payload: { aps: { sound: "default" } } },
+        });
+        await admin.database().ref(`devices/${id}/meta/lastAlertAt`).set(now);
+        alerted++;
+      } catch (e) {
+        logger.warn("stale alert failed", { id, code: (e as { code?: string }).code });
+      }
+    });
+    logger.info("staleDeviceAlert done", { devices: ids.length, alerted });
   },
 );

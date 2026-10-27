@@ -6,7 +6,11 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.util.Log
+import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import java.util.concurrent.TimeUnit
@@ -80,12 +84,24 @@ object Scheduler {
         SyncStore.get(ctx).workerScheduled = true
     }
 
+    /**
+     * Offline layer: when rows are stuck in the queue, ask WorkManager to flush them the moment any network
+     * returns. WorkManager persists this across process death and reboot, independent of the service.
+     */
+    fun enqueueFlushWhenOnline(ctx: Context) {
+        val req = OneTimeWorkRequestBuilder<FlushWorker>()
+            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+            .build()
+        WorkManager.getInstance(ctx).enqueueUniqueWork("bgsync-flush", ExistingWorkPolicy.KEEP, req)
+    }
+
     fun cancelAll(ctx: Context) {
         val am = ctx.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         am.cancel(pi(ctx, ACTION_WATCHDOG, RC_WATCHDOG))
         am.cancel(pi(ctx, ACTION_WATCHDOG_CLOCK, RC_CLOCK))
         am.cancel(pi(ctx, ACTION_RESTART, RC_RESTART))
         WorkManager.getInstance(ctx).cancelUniqueWork(WORK_NAME)
+        WorkManager.getInstance(ctx).cancelUniqueWork("bgsync-flush")
         SyncStore.get(ctx).apply { workerScheduled = false; watchdogNextAt = 0 }
     }
 

@@ -38,6 +38,8 @@ class MainActivity : FlutterActivity() {
                 "start" -> {
                     store.running = true
                     io.execute {
+                        ExitReasons.record(this)
+                        ManagedMode.apply(this)
                         SyncManager.init(this)
                         Scheduler.armWatchdog(this)
                         Scheduler.enqueueWorker(this)
@@ -123,6 +125,8 @@ class MainActivity : FlutterActivity() {
             item("oem", "OEM auto-start / background (${Build.MANUFACTURER})", SyncStore.get(this).oemAck || !OemIntents.hasKnownTarget(),
                 if (OemIntents.hasKnownTarget()) "Tap to open the vendor screen: allow auto-start, set battery to 'No restrictions'" else "No vendor screen known for this device"),
         )
+        list += item("managed", "Managed device (Force Stop locked)", ManagedMode.forceStopLocked(this),
+            "Recommended for remote units: provision as device owner (README > Managed devices). Without it, Force Stop ends all sync")
         return list
     }
 
@@ -139,6 +143,7 @@ class MainActivity : FlutterActivity() {
             "exact" ->
                 if (Build.VERSION.SDK_INT >= 31)
                     startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, Uri.parse("package:$packageName")))
+            "managed" -> {} // cannot be granted in-app: needs adb / QR provisioning, see README
             "oem" -> {
                 // The OS cannot report this setting, so opening the vendor screen counts as acknowledged.
                 if (OemIntents.open(this) == null)
